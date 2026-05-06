@@ -62,10 +62,25 @@ Stored under vault key `mem.rest_api_key`. Used as `Authorization: Bearer <key>`
 
 ## Testing
 
-`test/widget_test.dart` runs a small **unit** check on endpoint constants so CI does not require plugin mocks or timer-heavy chat widgets. Full widget/integration tests should run on a device or emulator with configured credentials if you add them later.
+- `test/widget_test.dart` — endpoint constants.
+- `test/openai_stream_accumulator_test.dart` — OpenAI SSE delta parsing.
+- **`integration_test/app_smoke_test.dart`** — run on a **device or emulator**:
+  `flutter test integration_test/app_smoke_test.dart`
+
+Unit tests avoid plugin-backed vault loads and full **Chat** mounting (empty-chat UI schedules timers that fail `pumpAndSettle` in the VM harness).
+
+## Chat streaming (OpenAI)
+
+`OpenAiMemAgent` requests **`stream: true`** (SSE) for each completion round. `MemChatPage` wires `onAssistantTextDelta` to update the assistant bubble incrementally. Tool calls are merged from stream chunks (`openai_stream_accumulator.dart`); tool execution between rounds is unchanged. If the stream request fails (`DioException`), one **non-streaming** fallback runs for that round.
+
+Anthropic chat remains **non-streaming** for now.
+
+## Note lifecycle (REST)
+
+`MemApiClient`: `trashNote`, `restoreNote`, `deleteNoteHard` map to Mem’s `POST .../trash`, `POST .../restore`, and `DELETE /v2/notes/{note_id}`. Note detail exposes trash / restore / delete permanently; tools add `trash_note` and `restore_note`.
 
 ## Known limitations / extension points
 
-- **Streaming LLM replies** — Not implemented; responses appear after full completion. OpenAI and Anthropic streaming APIs can be wired in without changing Mem integration.
+- **Anthropic streaming** — Not implemented.
 - **MCP transport** — If Mem returns non-JSON bodies (e.g. SSE under load), extend `McpSessionClient` to parse stream chunks; today the client expects JSON-RPC-shaped responses after tool calls.
-- **Extra Mem endpoints** — Attachments, trash, audio, etc., can be added by extending `MemApiClient` using the same OpenAPI-derived paths in the official docs.
+- **Extra Mem endpoints** — Attachments, audio, etc., can be added by extending `MemApiClient` using documented paths / OpenAPI.

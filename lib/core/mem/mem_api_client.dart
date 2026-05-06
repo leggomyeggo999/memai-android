@@ -213,6 +213,28 @@ class MemApiClient {
     }).toList();
   }
 
+  /// Soft-delete; recoverable via [restoreNote]. See Mem OpenAPI `Trash Note`.
+  Future<String> trashNote(String noteId) async {
+    final res = await _dio.post<Map<String, dynamic>>('/v2/notes/$noteId/trash');
+    final id = res.data?['request_id'] as String?;
+    if (id == null) throw MemApiException('trash missing request_id');
+    return id;
+  }
+
+  Future<String> restoreNote(String noteId) async {
+    final res = await _dio.post<Map<String, dynamic>>('/v2/notes/$noteId/restore');
+    final id = res.data?['request_id'] as String?;
+    if (id == null) throw MemApiException('restore missing request_id');
+    return id;
+  }
+
+  Future<String> deleteNoteHard(String noteId) async {
+    final res = await _dio.delete<Map<String, dynamic>>('/v2/notes/$noteId');
+    final id = res.data?['request_id'] as String?;
+    if (id == null) throw MemApiException('delete missing request_id');
+    return id;
+  }
+
   Future<Map<String, dynamic>> rawListNotes({
     int limit = 50,
     String? page,

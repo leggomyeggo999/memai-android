@@ -155,6 +155,21 @@ class _MemChatPageState extends State<MemChatPage> {
         final res = await agent.runConversation(
           priorOpenAiMessages: _openAiHist,
           userText: trimmed,
+          onAssistantTextDelta: (accumulated) async {
+            if (!mounted) return;
+            final old = _pendingById(pendingId);
+            if (old == null) return;
+            final display = accumulated.isEmpty ? '…' : accumulated;
+            await _chat.updateMessage(
+              old,
+              Message.text(
+                id: pendingId,
+                authorId: _kAssistantId,
+                text: display,
+                createdAt: DateTime.now(),
+              ),
+            );
+          },
         );
         _openAiHist
           ..clear()
@@ -179,16 +194,18 @@ class _MemChatPageState extends State<MemChatPage> {
         throw StateError('Unsupported provider: ${profile.provider}');
       }
 
-      final pending = _chat.messages.lastWhere((m) => m.id == pendingId);
-      await _chat.updateMessage(
-        pending,
-        Message.text(
-          id: pendingId,
-          authorId: _kAssistantId,
-          text: reply,
-          createdAt: DateTime.now(),
-        ),
-      );
+      final pending = _pendingById(pendingId);
+      if (pending != null) {
+        await _chat.updateMessage(
+          pending,
+          Message.text(
+            id: pendingId,
+            authorId: _kAssistantId,
+            text: reply,
+            createdAt: DateTime.now(),
+          ),
+        );
+      }
     } catch (e) {
       await _failMessage(pendingId, e.toString());
     } finally {
@@ -196,14 +213,15 @@ class _MemChatPageState extends State<MemChatPage> {
     }
   }
 
-  Future<void> _failMessage(String messageId, String err) async {
-    Message? pending;
+  Message? _pendingById(String messageId) {
     for (final m in _chat.messages) {
-      if (m.id == messageId) {
-        pending = m;
-        break;
-      }
+      if (m.id == messageId) return m;
     }
+    return null;
+  }
+
+  Future<void> _failMessage(String messageId, String err) async {
+    final pending = _pendingById(messageId);
     if (pending == null) return;
     await _chat.updateMessage(
       pending,

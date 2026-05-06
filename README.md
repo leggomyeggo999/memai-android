@@ -15,6 +15,9 @@ Native Mem companion for Android: **Pulse** (timeline), **Capture** (Mem-it + ra
    - **Add chat model** — choose OpenAI or Anthropic, enter the **model id** your account supports, and the **provider API key**.
 3. `flutter run` on a device or emulator.
 
+**Integration smoke test (device/emulator):** from this directory,
+`flutter test integration_test/app_smoke_test.dart`
+
 ## Mem platform references
 
 - API: [https://docs.mem.ai/api-reference/overview/introduction](https://docs.mem.ai/api-reference/overview/introduction)

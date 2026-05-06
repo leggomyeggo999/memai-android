@@ -65,6 +65,7 @@ class MemToolRunner {
             limit: (args['limit'] as num?)?.toInt() ?? 25,
             orderBy: args['order_by'] as String? ?? 'updated_at',
             includeContent: false,
+            collectionId: args['collection_id'] as String?,
           );
           return jsonEncode({
             'total': raw['total'],
@@ -123,6 +124,12 @@ class MemToolRunner {
             'status':
                 'Mem is processing this asynchronously; it will appear in search shortly.',
           });
+        case 'trash_note':
+          final req = await c.trashNote(args['note_id'] as String);
+          return jsonEncode({'request_id': req, 'status': 'moved to trash'});
+        case 'restore_note':
+          final req = await c.restoreNote(args['note_id'] as String);
+          return jsonEncode({'request_id': req, 'status': 'restored'});
         default:
           return jsonEncode({'error': 'unknown_tool', 'name': name});
       }

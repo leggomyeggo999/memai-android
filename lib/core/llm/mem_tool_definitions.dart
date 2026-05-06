@@ -108,6 +108,28 @@ List<Map<String, dynamic>> memToolSpecifications() {
         'required': ['input'],
       },
     ),
+    _fn(
+      'trash_note',
+      'Soft-delete a note (moves to trash; restorable).',
+      {
+        'type': 'object',
+        'properties': {
+          'note_id': {'type': 'string', 'description': 'Note UUID'},
+        },
+        'required': ['note_id'],
+      },
+    ),
+    _fn(
+      'restore_note',
+      'Restore a trashed note to the active set.',
+      {
+        'type': 'object',
+        'properties': {
+          'note_id': {'type': 'string', 'description': 'Trashed note UUID'},
+        },
+        'required': ['note_id'],
+      },
+    ),
   ];
 }
 
