@@ -4,11 +4,13 @@ import '../config/mem_endpoints.dart';
 import '../security/secure_vault.dart';
 import 'mcp_dynamic_registration.dart';
 
-/// Mem-hosted OAuth for MCP, using PKCE via `flutter_appauth`.
+/// Mem-hosted OAuth for MCP using **Chrome Custom Tabs** (`flutter_appauth`).
 ///
-/// Discovery values were cross-checked against
-/// `https://mcp.mem.ai/.well-known/oauth-protected-resource` and live probes
-/// (`authorization_endpoint`, `token_endpoint`).
+/// Google blocks sign-in inside embedded **WebViews** (`403 disallowed_useragent`);
+/// Custom Tabs use a real browser profile and comply with Google’s policy.
+///
+/// **Redirect scheme must be RFC 3986–legal** (no `_` in the scheme; use
+/// `com.memai.memaiandroid`, not `com.memai.memai_android`).
 class MemMcpOAuth {
   MemMcpOAuth({
     required SecureVault vault,
@@ -18,7 +20,7 @@ class MemMcpOAuth {
        _appAuth = appAuth ?? FlutterAppAuth(),
        _registration = registration ?? McpDynamicRegistration();
 
-  static const redirectUrl = 'com.memai.memai_android://oauth';
+  static const redirectUrl = 'com.memai.memaiandroid://oauth';
   static const scopes = ['content.read', 'content.write'];
 
   final SecureVault _vault;
@@ -27,12 +29,16 @@ class MemMcpOAuth {
 
   /// Ensures a `client_id` exists (persists in the vault).
   Future<String> ensureRegisteredClientId() async {
+    await _vault.ensureMcpRedirectMatchesOrReset(redirectUrl);
+
     final existing = await _vault.getMcpClientId();
     if (existing != null && existing.isNotEmpty) return existing;
+
     final id = await _registration.registerPublicClient(
       redirectUri: redirectUrl,
     );
     await _vault.setMcpClientId(id);
+    await _vault.setMcpRegisteredRedirectUri(redirectUrl);
     return id;
   }
 
@@ -66,12 +72,13 @@ class MemMcpOAuth {
       refreshToken: refresh,
       accessExpiry: expiry,
     );
+    await _vault.setMcpRegisteredRedirectUri(redirectUrl);
   }
 
   Future<void> signOutMcp() => _vault.clearMcpOAuth();
 
-  /// Refreshes OAuth tokens using the stored refresh token (no UI).
   Future<void> refreshIfNeeded() async {
+    await _vault.ensureMcpRedirectMatchesOrReset(redirectUrl);
     final refresh = await _vault.getMcpRefreshToken();
     final clientId = await _vault.getMcpClientId();
     if (refresh == null || clientId == null) return;
@@ -107,5 +114,6 @@ class MemMcpOAuth {
       refreshToken: newRefresh,
       accessExpiry: expiry,
     );
+    await _vault.setMcpRegisteredRedirectUri(redirectUrl);
   }
 }

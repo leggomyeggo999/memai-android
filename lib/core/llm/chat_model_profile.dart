@@ -13,7 +13,7 @@ class ChatModelProfile {
   final String id;
   final String displayName;
 
-  /// `openai` or `anthropic`
+  /// `openai`, `anthropic`, or `gemini` (Google AI Studio key).
   final String provider;
   final String model;
 

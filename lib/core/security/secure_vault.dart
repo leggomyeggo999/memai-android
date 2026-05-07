@@ -19,6 +19,9 @@ class SecureVault {
   // --- Dynamic OAuth client (RFC 7591 register at Mem `oauth2/register`)
   static const _mcpClientId = 'mem.mcp.client_id';
 
+  /// Last redirect URI used with `oauth2/register` for this install (migration).
+  static const _mcpRegisteredRedirectUri = 'mem.mcp.registered_redirect_uri';
+
   // --- OAuth tokens for MCP HTTP transport (`Authorization: Bearer`)
   static const _mcpAccess = 'mem.mcp.access_token';
   static const _mcpRefresh = 'mem.mcp.refresh_token';
@@ -30,6 +33,8 @@ class SecureVault {
 
   // --- Per-profile API keys for external LLMs
   static String _llmKeySlot(String profileId) => 'chat.llm_key.$profileId';
+  static const _voiceOpenAiApiKey = 'voice.openai_api_key';
+  static const _voiceWhisperModel = 'voice.whisper_model';
 
   Future<void> setMemApiKey(String? value) async {
     if (value == null || value.isEmpty) {
@@ -69,6 +74,30 @@ class SecureVault {
   }
 
   Future<String?> getMcpClientId() => _storage.read(key: _mcpClientId);
+
+  Future<String?> getMcpRegisteredRedirectUri() =>
+      _storage.read(key: _mcpRegisteredRedirectUri);
+
+  Future<void> setMcpRegisteredRedirectUri(String uri) async {
+    await _storage.write(key: _mcpRegisteredRedirectUri, value: uri);
+  }
+
+  /// If [expectedRedirect] differs from what we registered (or legacy client
+  /// without stored redirect), clears MCP tokens + `client_id` so the next
+  /// registration uses the new URI (e.g. scheme legal character fix).
+  Future<void> ensureMcpRedirectMatchesOrReset(String expectedRedirect) async {
+    final stored = await getMcpRegisteredRedirectUri();
+    final clientId = await getMcpClientId();
+    final mismatch = stored != null && stored != expectedRedirect;
+    final legacyNoMarker = stored == null && clientId != null && clientId.isNotEmpty;
+    if (mismatch || legacyNoMarker) {
+      await _storage.delete(key: _mcpAccess);
+      await _storage.delete(key: _mcpRefresh);
+      await _storage.delete(key: _mcpExpiry);
+      await _storage.delete(key: _mcpClientId);
+      await _storage.delete(key: _mcpRegisteredRedirectUri);
+    }
+  }
   Future<String?> getMcpAccessToken() => _storage.read(key: _mcpAccess);
   Future<String?> getMcpRefreshToken() => _storage.read(key: _mcpRefresh);
 
@@ -98,4 +127,20 @@ class SecureVault {
 
   Future<String?> getLlmApiKey(String profileId) =>
       _storage.read(key: _llmKeySlot(profileId));
+
+  Future<void> setVoiceOpenAiApiKey(String? key) async {
+    if (key == null || key.isEmpty) {
+      await _storage.delete(key: _voiceOpenAiApiKey);
+    } else {
+      await _storage.write(key: _voiceOpenAiApiKey, value: key);
+    }
+  }
+
+  Future<String?> getVoiceOpenAiApiKey() => _storage.read(key: _voiceOpenAiApiKey);
+
+  Future<void> setVoiceWhisperModel(String modelId) async {
+    await _storage.write(key: _voiceWhisperModel, value: modelId);
+  }
+
+  Future<String?> getVoiceWhisperModel() => _storage.read(key: _voiceWhisperModel);
 }

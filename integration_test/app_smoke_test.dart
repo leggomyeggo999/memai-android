@@ -16,7 +16,7 @@ void main() {
   ) async {
     final state = AppState();
     await tester.pumpWidget(
-      AppScope(state: state, child: const MemAiApp()),
+      AppScope(state: state, child: const MemDroidApp()),
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
@@ -24,10 +24,13 @@ void main() {
     expect(find.byType(MemShell), findsOneWidget);
     expect(find.byType(NavigationBar), findsOneWidget);
 
-    await tester.tap(find.byIcon(Icons.add_circle_outlined));
+    await tester.tap(find.byIcon(Icons.add_circle_outline));
     await tester.pumpAndSettle(const Duration(seconds: 2));
 
-    await tester.tap(find.byIcon(Icons.library_books_outlined));
+    await tester.tap(find.byIcon(Icons.chat_bubble_outline));
+    await tester.pumpAndSettle(const Duration(seconds: 2));
+
+    await tester.tap(find.byIcon(Icons.article_outlined));
     await tester.pumpAndSettle(const Duration(seconds: 2));
   });
 }

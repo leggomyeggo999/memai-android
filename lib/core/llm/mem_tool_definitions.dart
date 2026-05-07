@@ -133,6 +133,20 @@ List<Map<String, dynamic>> memToolSpecifications() {
   ];
 }
 
+/// Function declarations for Gemini `tools[].functionDeclarations`.
+List<Map<String, dynamic>> memToolGeminiDeclarations() {
+  return [
+    for (final t in memToolSpecifications())
+      {
+        'name': t['function']['name'] as String,
+        'description': t['function']['description'] as String,
+        'parameters': Map<String, dynamic>.from(
+          t['function']['parameters'] as Map,
+        ),
+      },
+  ];
+}
+
 Map<String, dynamic> _fn(
   String name,
   String description,

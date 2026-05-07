@@ -143,10 +143,15 @@ class MemApiClient {
     required String noteId,
     required String markdown,
     required int version,
+    List<String>? collectionIds,
   }) async {
     final res = await _dio.patch<Map<String, dynamic>>(
       '/v2/notes/$noteId',
-      data: {'content': markdown, 'version': version},
+      data: {
+        'content': markdown,
+        'version': version,
+        if (collectionIds != null) 'collection_ids': collectionIds,
+      },
     );
     final e = res.data;
     if (e == null) throw MemApiException('Empty response');
@@ -211,6 +216,75 @@ class MemApiClient {
         updatedAt: DateTime.parse(m['updated_at'] as String),
       );
     }).toList();
+  }
+
+  Future<MemCollectionItem> readCollection(String collectionId) async {
+    final res = await _dio.get<Map<String, dynamic>>(
+      '/v2/collections/$collectionId',
+    );
+    final m = res.data;
+    if (m == null) throw MemApiException('Empty response');
+    return MemCollectionItem(
+      id: m['id'] as String,
+      title: m['title'] as String? ?? '',
+      description: m['description'] as String?,
+      noteCount: m['note_count'] as int? ?? 0,
+      createdAt: DateTime.parse(m['created_at'] as String),
+      updatedAt: DateTime.parse(m['updated_at'] as String),
+    );
+  }
+
+  Future<MemCollectionItem> createCollection({
+    String? id,
+    required String title,
+    String? description,
+  }) async {
+    final res = await _dio.post<Map<String, dynamic>>(
+      '/v2/collections',
+      data: {
+        if (id != null) 'id': id,
+        'title': title,
+        if (description != null && description.isNotEmpty) 'description': description,
+      },
+    );
+    final e = res.data;
+    if (e == null) throw MemApiException('Empty response');
+    return MemCollectionItem(
+      id: e['id'] as String,
+      title: e['title'] as String? ?? '',
+      description: e['description'] as String?,
+      noteCount: e['note_count'] as int? ?? 0,
+      createdAt: DateTime.parse(e['created_at'] as String),
+      updatedAt: DateTime.parse(e['updated_at'] as String),
+    );
+  }
+
+  Future<MemCollectionItem> updateCollection({
+    required String collectionId,
+    String? title,
+    String? description,
+  }) async {
+    final res = await _dio.patch<Map<String, dynamic>>(
+      '/v2/collections/$collectionId',
+      data: {
+        if (title != null) 'title': title,
+        if (description != null) 'description': description,
+      },
+    );
+    final e = res.data;
+    if (e == null) throw MemApiException('Empty response');
+    return MemCollectionItem(
+      id: e['id'] as String,
+      title: e['title'] as String? ?? '',
+      description: e['description'] as String?,
+      noteCount: e['note_count'] as int? ?? 0,
+      createdAt: DateTime.parse(e['created_at'] as String),
+      updatedAt: DateTime.parse(e['updated_at'] as String),
+    );
+  }
+
+  Future<void> deleteCollection(String collectionId) async {
+    await _dio.delete<void>('/v2/collections/$collectionId');
   }
 
   /// Soft-delete; recoverable via [restoreNote]. See Mem OpenAPI `Trash Note`.

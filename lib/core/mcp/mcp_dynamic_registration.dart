@@ -6,9 +6,9 @@ import '../config/mem_endpoints.dart';
 ///
 /// The redirect URI **must** stay in sync with:
 /// - `android/app/build.gradle.kts` `appAuthRedirectScheme`
-/// - The `redirectUrl` passed to `flutter_appauth`
+/// - [`MemMcpOAuth.redirectUrl`].
 ///
-/// Format: `{scheme}://oauth` — e.g. `com.memai.memai_android://oauth`
+/// Format: `{scheme}://oauth` — scheme must be RFC 3986–valid (no `_` in scheme).
 class McpDynamicRegistration {
   McpDynamicRegistration({Dio? dio})
     : _dio =
@@ -26,7 +26,7 @@ class McpDynamicRegistration {
   /// Returns the `client_id` issued by Mem for this install.
   Future<String> registerPublicClient({
     required String redirectUri,
-    String clientName = 'Mem AI Android',
+    String clientName = 'MemDroid Android',
   }) async {
     final res = await _dio.post<Map<String, dynamic>>(
       MemEndpoints.oauthRegisterPath,
