@@ -11,6 +11,12 @@ Credentials and tokens are stored on-device with `flutter_secure_storage`.
 
 > **Notice:** This repository is primarily Cursor-generated. There is no guarantee that changes have gone through a human-reviewed pull request process.
 
+## Installation
+
+Use the latest release assets here:
+
+- [Download from GitHub Releases (v1.0.0)](https://github.com/leggomyeggo999/memai-android/releases/tag/v1.0.0)
+
 ---
 
 ## Settings and auth guide (the 4 key sections)
