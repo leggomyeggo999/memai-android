@@ -308,19 +308,49 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
-          ? Center(child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text(_error!),
-            ))
-          : ListView(
-              padding: const EdgeInsets.all(20),
-              children: [
-                if (!_editing && _assignedCollectionIds.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(_error!),
+                  ),
+                )
+              : SingleChildScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(
+                    parent: BouncingScrollPhysics(),
+                  ),
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (!_editing && _assignedCollectionIds.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Collections',
+                                style: Theme.of(context).textTheme.labelLarge,
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: _assignedCollectionIds
+                                    .map(
+                                      (id) => Chip(
+                                        label: Text(_collectionTitle(id)),
+                                        visualDensity: VisualDensity.compact,
+                                        materialTapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                      ),
+                                    )
+                                    .toList(),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (_editing && _collections.isNotEmpty) ...[
                         Text(
                           'Collections',
                           style: Theme.of(context).textTheme.labelLarge,
@@ -329,72 +359,51 @@ class _NoteDetailPageState extends State<NoteDetailPage> {
                         Wrap(
                           spacing: 8,
                           runSpacing: 8,
-                          children: _assignedCollectionIds
-                              .map(
-                                (id) => Chip(
-                                  label: Text(_collectionTitle(id)),
-                                  visualDensity: VisualDensity.compact,
-                                  materialTapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                ),
-                              )
-                              .toList(),
+                          children: _collections.map((col) {
+                            final on = _assignedCollectionIds.contains(col.id);
+                            return FilterChip(
+                              label: Text(col.title),
+                              selected: on,
+                              onSelected: (sel) {
+                                setState(() {
+                                  if (sel) {
+                                    _assignedCollectionIds.add(col.id);
+                                  } else {
+                                    _assignedCollectionIds.remove(col.id);
+                                  }
+                                });
+                              },
+                            );
+                          }).toList(),
                         ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Markdown',
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                        const SizedBox(height: 8),
                       ],
-                    ),
+                      if (_editing)
+                        TextField(
+                          controller: _editCtrl,
+                          maxLines: null,
+                          minLines: 16,
+                          keyboardType: TextInputType.multiline,
+                          decoration: const InputDecoration(
+                            border: OutlineInputBorder(),
+                            hintText: 'First line becomes the title',
+                          ),
+                        )
+                      else
+                        // MarkdownBody (not Markdown): no nested scroll view, so
+                        // the parent SingleChildScrollView receives drags on mobile.
+                        MarkdownBody(
+                          data: _markdown ?? '',
+                          selectable: true,
+                        ),
+                    ],
                   ),
-                if (_editing && _collections.isNotEmpty) ...[
-                  Text(
-                    'Collections',
-                    style: Theme.of(context).textTheme.labelLarge,
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: _collections.map((col) {
-                      final on = _assignedCollectionIds.contains(col.id);
-                      return FilterChip(
-                        label: Text(col.title),
-                        selected: on,
-                        onSelected: (sel) {
-                          setState(() {
-                            if (sel) {
-                              _assignedCollectionIds.add(col.id);
-                            } else {
-                              _assignedCollectionIds.remove(col.id);
-                            }
-                          });
-                        },
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Markdown',
-                    style: Theme.of(context).textTheme.labelLarge,
-                  ),
-                  const SizedBox(height: 8),
-                ],
-                if (_editing)
-                  TextField(
-                    controller: _editCtrl,
-                    maxLines: null,
-                    minLines: 16,
-                    keyboardType: TextInputType.multiline,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      hintText: 'First line becomes the title',
-                    ),
-                  )
-                else
-                  Markdown(
-                    data: _markdown ?? '',
-                    selectable: true,
-                    shrinkWrap: true,
-                  ),
-              ],
-            ),
+                ),
     );
   }
 }
