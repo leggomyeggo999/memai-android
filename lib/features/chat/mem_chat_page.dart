@@ -1,7 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_chat_core/flutter_chat_core.dart';
 import 'package:flutter_chat_ui/flutter_chat_ui.dart';
-import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 
@@ -16,7 +17,8 @@ import '../../core/mem/mem_api_client.dart';
 import '../../core/mcp/mcp_session_client.dart';
 import '../../core/notifications/mem_job_notifications.dart';
 import '../../core/prompts/prompt_template.dart';
-import '../../core/llm/curated_chat_models.dart';
+import '../../core/llm/chat_error_utils.dart';
+import '../../core/telemetry/mem_error_reporter.dart';
 import '../../widgets/settings_launcher.dart';
 import 'chat_prompt_queue.dart';
 
@@ -46,6 +48,8 @@ class _MemChatPageState extends State<MemChatPage> {
   final List<Map<String, dynamic>> _anthropicHist = [];
   final List<Map<String, dynamic>> _geminiHist = [];
   bool _busy = false;
+  final List<QueuedPromptJob> _queuedPromptRuns = [];
+  bool _drainingPromptRuns = false;
 
   @override
   void initState() {
@@ -62,15 +66,27 @@ class _MemChatPageState extends State<MemChatPage> {
   }
 
   void _onPromptQueueChanged() {
-    final job = widget.promptQueue.consume();
-    if (job == null || !mounted) return;
+    final jobs = widget.promptQueue.drainAll();
+    if (jobs.isEmpty || !mounted) return;
+    _queuedPromptRuns.addAll(jobs);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _runUserPrompt(
+      unawaited(_drainQueuedPromptRuns());
+    });
+  }
+
+  Future<void> _drainQueuedPromptRuns() async {
+    if (_drainingPromptRuns || !mounted) return;
+    _drainingPromptRuns = true;
+    while (_queuedPromptRuns.isNotEmpty && mounted) {
+      final job = _queuedPromptRuns.removeAt(0);
+      await _runUserPrompt(
         job.text,
         notifyTitle: job.notifyOnComplete ? job.notificationTitle : null,
+        fromPromptJob: true,
       );
-    });
+    }
+    _drainingPromptRuns = false;
   }
 
   Future<User?> _resolve(UserID id) async {
@@ -101,9 +117,23 @@ class _MemChatPageState extends State<MemChatPage> {
   Future<void> _runUserPrompt(
     String trimmed, {
     String? notifyTitle,
+    bool fromPromptJob = false,
   }) async {
     final messenger = ScaffoldMessenger.of(context);
-    if (trimmed.isEmpty || _busy) return;
+    if (trimmed.isEmpty) return;
+    if (_busy) {
+      if (fromPromptJob) {
+        while (_busy && mounted) {
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+        }
+      } else {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Wait for the current reply to finish.')),
+        );
+        return;
+      }
+    }
+    if (!mounted) return;
 
     final app = AppScope.of(context);
     final profile = _activeProfile(context);
@@ -268,13 +298,25 @@ class _MemChatPageState extends State<MemChatPage> {
           detail: reply,
         );
       }
-    } catch (e) {
-      await _failMessage(pendingId, _formatChatError(e, profile: profile));
+    } catch (e, st) {
+      final ctx = fromPromptJob || notifyTitle != null ? 'prompt_job' : 'chat';
+      final details = formatChatError(e, profile: profile, context: ctx);
+      if (details.httpStatus == 400) {
+        _resetProviderHistory(profile.provider);
+      }
+      MemErrorReporter.report(
+        message: details.userMessage,
+        stack: st.toString(),
+        context: ctx,
+        provider: profile.provider,
+        httpStatus: details.httpStatus,
+      );
+      await _failMessage(pendingId, details.userMessage);
       if (notifyTitle != null) {
         await MemJobNotifications.showPromptJobFinished(
           title: notifyTitle,
           ok: false,
-          detail: _formatChatError(e, profile: profile),
+          detail: details.userMessage,
         );
       }
     } finally {
@@ -282,18 +324,17 @@ class _MemChatPageState extends State<MemChatPage> {
     }
   }
 
-  String _formatChatError(Object e, {required ChatModelProfile profile}) {
-    if (e is DioException) {
-      final code = e.response?.statusCode;
-      if (code == 404) {
-        return 'Error: ${chatProviderBrand(profile.provider)} returned 404. '
-            'This usually means the model id is not available: "${profile.model}". '
-            'Pick a different model in Settings → Chat models.';
-      }
-      final msg = e.message ?? 'Network error';
-      return 'Error: $msg (HTTP ${code ?? "?"})';
+  void _resetProviderHistory(String provider) {
+    switch (provider) {
+      case 'openai':
+        _openAiHist
+          ..clear()
+          ..add({'role': 'system', 'content': _systemPrompt});
+      case 'anthropic':
+        _anthropicHist.clear();
+      case 'gemini':
+        _geminiHist.clear();
     }
-    return 'Error: $e';
   }
 
   Message? _pendingById(String messageId) {
@@ -306,12 +347,13 @@ class _MemChatPageState extends State<MemChatPage> {
   Future<void> _failMessage(String messageId, String err) async {
     final pending = _pendingById(messageId);
     if (pending == null) return;
+    final display = err.startsWith('Error') ? err : 'Error: $err';
     await _chat.updateMessage(
       pending,
       Message.text(
         id: messageId,
         authorId: _kAssistantId,
-        text: 'Error: $err',
+        text: display,
         createdAt: DateTime.now(),
       ),
     );

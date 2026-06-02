@@ -14,20 +14,22 @@ class QueuedPromptJob {
   final bool notifyOnComplete;
 }
 
+/// FIFO queue for prompt jobs; supports multiple pending runs.
 class ChatPromptQueue extends ChangeNotifier {
-  QueuedPromptJob? _pending;
+  final List<QueuedPromptJob> _pending = [];
 
-  bool get hasPending => _pending != null;
+  bool get hasPending => _pending.isNotEmpty;
 
   void enqueue(QueuedPromptJob job) {
-    _pending = job;
+    _pending.add(job);
     notifyListeners();
   }
 
-  /// Consumer should call once when handling the queue (e.g. from [addListener]).
-  QueuedPromptJob? consume() {
-    final j = _pending;
-    _pending = null;
-    return j;
+  /// Removes and returns all pending jobs (consumer drains in order).
+  List<QueuedPromptJob> drainAll() {
+    if (_pending.isEmpty) return const [];
+    final copy = List<QueuedPromptJob>.from(_pending);
+    _pending.clear();
+    return copy;
   }
 }

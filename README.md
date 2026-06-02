@@ -100,6 +100,23 @@ This is the most important setup concept: each settings section powers different
 
 ---
 
+## Client error reporting (optional)
+
+MemDroid can POST anonymized client errors (no API keys) to a tiny endpoint you deploy:
+
+1. Deploy the Cloudflare Worker in [`server/error-reporter/`](server/error-reporter/README.md) (free-tier friendly).
+2. Build with dart-defines:
+
+```bash
+flutter build apk --release \
+  --dart-define=MEMDROID_ERROR_REPORT_URL=https://<your-worker>.workers.dev/report \
+  --dart-define=MEMDROID_ERROR_REPORT_SECRET=<optional-shared-secret>
+```
+
+If these defines are omitted, error reporting is disabled.
+
+---
+
 ## Build and test
 
 - Static checks/tests:

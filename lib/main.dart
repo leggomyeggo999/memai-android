@@ -5,11 +5,13 @@ import 'package:flutter/material.dart';
 import 'app_scope.dart';
 import 'app_state.dart';
 import 'core/notifications/mem_job_notifications.dart';
+import 'core/telemetry/mem_error_reporter.dart';
 import 'features/shell/mem_shell.dart';
 import 'theme/mem_app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MemErrorReporter.installGlobalHandlers();
   final state = AppState();
   MemJobNotifications.onOpenHomeTab = () => state.goToShellTab(0);
   runApp(AppScope(state: state, child: const MemDroidApp()));

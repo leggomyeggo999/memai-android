@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import '../../app_scope.dart';
 import '../../app_state.dart';
+import '../../core/telemetry/mem_error_reporter.dart';
 import '../../widgets/settings_launcher.dart';
 import '../../core/mem/mem_api_client.dart';
 import '../../core/mem/mem_models.dart';
@@ -128,7 +129,12 @@ class _NotesPageState extends State<NotesPage> {
         _nextPage = n is String ? n : null;
         _loading = false;
       });
-    } catch (e) {
+    } catch (e, st) {
+      MemErrorReporter.report(
+        message: e.toString(),
+        stack: st.toString(),
+        context: 'notes_load',
+      );
       setState(() {
         _loading = false;
         _error = e.toString();
@@ -170,6 +176,11 @@ class _NotesPageState extends State<NotesPage> {
     await _loadNotes(refresh: true);
   }
 
+  Future<void> _onRefresh() async {
+    await _loadCollections();
+    await _loadNotes(refresh: true);
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
@@ -178,20 +189,18 @@ class _NotesPageState extends State<NotesPage> {
         title: const Text('Notes'),
         actions: settingsIconActions(context),
       ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (app.hasMemRest) _buildFilterBar(context),
-          Expanded(
-            child: RefreshIndicator(
-              onRefresh: () async {
-                await _loadCollections();
-                await _loadNotes(refresh: true);
-              },
-              child: _body(app),
-            ),
+      body: RefreshIndicator(
+        onRefresh: _onRefresh,
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(
+            parent: BouncingScrollPhysics(),
           ),
-        ],
+          slivers: [
+            if (app.hasMemRest)
+              SliverToBoxAdapter(child: _buildFilterBar(context)),
+            ..._noteSlivers(context, app),
+          ],
+        ),
       ),
     );
   }
@@ -254,64 +263,101 @@ class _NotesPageState extends State<NotesPage> {
     );
   }
 
-  Widget _body(AppState app) {
+  List<Widget> _noteSlivers(BuildContext context, AppState app) {
     if (!app.hasMemRest) {
-      return ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        children: const [
-          SizedBox(height: 120),
-          Padding(
-            padding: EdgeInsets.symmetric(horizontal: 24),
-            child: Text(
-              'Add your Mem API key in Settings to see and edit your notes.',
-              textAlign: TextAlign.center,
-            ),
-          ),
-        ],
-      );
-    }
-    if (_error != null) {
-      return ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        children: [
-          Padding(padding: const EdgeInsets.all(24), child: Text(_error!)),
-        ],
-      );
-    }
-    final groups = _group();
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.only(bottom: 120),
-      children: [
-        if (_loading && _items.isEmpty) const LinearProgressIndicator(),
-        ...groups.entries.expand((e) {
-          return [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+      return [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Text(
-                e.key.toUpperCase(),
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  letterSpacing: 1.2,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+                'Add your Mem API key in Settings to see and edit your notes.',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyLarge,
               ),
             ),
-            ...e.value.map((n) => _NoteCard(note: n)),
-          ];
-        }),
-        if (_nextPage != null)
-          TextButton(
-            onPressed: _loading ? null : () => _loadNotes(),
-            child: _loading
-                ? const SizedBox(
-                    height: 18,
-                    width: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Text('Load more'),
           ),
-      ],
+        ),
+      ];
+    }
+
+    if (_error != null) {
+      return [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(_error!, textAlign: TextAlign.center),
+            ),
+          ),
+        ),
+      ];
+    }
+
+    if (_loading && _items.isEmpty) {
+      return const [
+        SliverToBoxAdapter(child: LinearProgressIndicator()),
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      ];
+    }
+
+    final groups = _group();
+    final slivers = <Widget>[
+      if (_loading && _items.isNotEmpty)
+        const SliverToBoxAdapter(child: LinearProgressIndicator()),
+    ];
+
+    for (final e in groups.entries) {
+      slivers.add(
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+            child: Text(
+              e.key.toUpperCase(),
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                letterSpacing: 1.2,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
+      );
+      slivers.add(
+        SliverList(
+          delegate: SliverChildBuilderDelegate(
+            (context, i) => _NoteCard(note: e.value[i]),
+            childCount: e.value.length,
+          ),
+        ),
+      );
+    }
+
+    slivers.add(
+      SliverPadding(
+        padding: const EdgeInsets.only(bottom: 120),
+        sliver: SliverToBoxAdapter(
+          child: _nextPage != null
+              ? TextButton(
+                  onPressed: _loading ? null : () => _loadNotes(),
+                  child: _loading
+                      ? const SizedBox(
+                          height: 18,
+                          width: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Load more'),
+                )
+              : const SizedBox(height: 8),
+        ),
+      ),
     );
+
+    return slivers;
   }
 }
 
