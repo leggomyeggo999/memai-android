@@ -68,6 +68,13 @@ flutter {
     source = "../.."
 }
 
+// home_widget pulls `glance-appwidget:1.+`; pin to avoid alpha requiring compileSdk 37 / AGP 9.1.
+configurations.configureEach {
+    resolutionStrategy {
+        force("androidx.glance:glance-appwidget:1.1.1")
+    }
+}
+
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
