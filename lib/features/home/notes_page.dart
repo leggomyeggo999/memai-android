@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -29,6 +31,7 @@ class _NotesPageState extends State<NotesPage> {
   String? _filterCollectionId;
 
   AppState? _app;
+  VoidCallback? _appListener;
 
   MemApiClient? _client(BuildContext context) {
     final app = AppScope.of(context);
@@ -43,20 +46,44 @@ class _NotesPageState extends State<NotesPage> {
     _loadCollections();
   }
 
+  void _onAppStateChanged() {
+    if (!mounted) return;
+    _tryInitialLoad();
+    setState(() {});
+  }
+
+  void _tryInitialLoad() {
+    final app = _app;
+    if (app == null || !app.isHydrated || !app.hasMemRest) return;
+    if (_loading) return;
+    if (_items.isNotEmpty && _error == null) return;
+    unawaited(_loadNotes(refresh: true));
+    unawaited(_loadCollections());
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final app = AppScope.of(context);
     if (!identical(_app, app)) {
       _app?.notesListRevision.removeListener(_onNotesRevision);
+      if (_appListener != null) {
+        _app?.removeListener(_appListener!);
+      }
       _app = app;
+      _appListener = _onAppStateChanged;
+      _app!.addListener(_appListener!);
       _app!.notesListRevision.addListener(_onNotesRevision);
     }
+    _tryInitialLoad();
   }
 
   @override
   void dispose() {
     _app?.notesListRevision.removeListener(_onNotesRevision);
+    if (_appListener != null) {
+      _app?.removeListener(_appListener!);
+    }
     super.dispose();
   }
 
@@ -81,9 +108,20 @@ class _NotesPageState extends State<NotesPage> {
   }
 
   Future<void> _loadNotes({bool refresh = false}) async {
+    final app = AppScope.of(context);
     final c = _client(context);
     if (c == null) {
-      setState(() => _error = 'Add your Mem API key in Settings.');
+      if (!app.isHydrated) {
+        setState(() {
+          _loading = true;
+          _error = null;
+        });
+        return;
+      }
+      setState(() {
+        _loading = false;
+        _error = 'Add your Mem API key in Settings.';
+      });
       return;
     }
     setState(() {
@@ -145,10 +183,7 @@ class _NotesPageState extends State<NotesPage> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _loadNotes(refresh: true);
-      _loadCollections();
-    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _tryInitialLoad());
   }
 
   Map<String, List<MemNoteListItem>> _group() {
@@ -264,6 +299,15 @@ class _NotesPageState extends State<NotesPage> {
   }
 
   List<Widget> _noteSlivers(BuildContext context, AppState app) {
+    if (!app.isHydrated) {
+      return const [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      ];
+    }
+
     if (!app.hasMemRest) {
       return [
         SliverFillRemaining(

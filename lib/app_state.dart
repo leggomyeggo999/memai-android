@@ -42,6 +42,9 @@ class AppState extends ChangeNotifier {
 
   bool get hasMemRest => memApiKey != null && memApiKey!.isNotEmpty;
 
+  /// True after the first [load] from secure storage has finished.
+  bool isHydrated = false;
+
   Future<void> load() async {
     await _vault.ensureMcpRedirectMatchesOrReset(MemMcpOAuth.redirectUrl);
     memApiKey = await _vault.getMemApiKey();
@@ -55,7 +58,9 @@ class AppState extends ChangeNotifier {
       activeModelId = chatModels.first.id;
     }
     await reloadPromptJobs();
+    isHydrated = true;
     notifyListeners();
+    bumpNotesListRevision();
   }
 
   Future<void> reloadPromptJobs() async {

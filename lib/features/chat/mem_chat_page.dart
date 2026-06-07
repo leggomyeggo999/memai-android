@@ -17,6 +17,7 @@ import '../../core/mem/mem_api_client.dart';
 import '../../core/mcp/mcp_session_client.dart';
 import '../../core/notifications/mem_job_notifications.dart';
 import '../../core/prompts/prompt_template.dart';
+import '../../core/chat/chat_session_store.dart';
 import '../../core/llm/chat_error_utils.dart';
 import '../../core/telemetry/mem_error_reporter.dart';
 import '../../widgets/settings_launcher.dart';
@@ -51,15 +52,105 @@ class _MemChatPageState extends State<MemChatPage> {
   final List<QueuedPromptJob> _queuedPromptRuns = [];
   bool _drainingPromptRuns = false;
 
+  final _sessionStore = ChatSessionStore();
+  String? _sessionProfileId;
+  AppState? _app;
+  VoidCallback? _appListener;
+
   @override
   void initState() {
     super.initState();
     _chat = InMemoryChatController();
     widget.promptQueue.addListener(_onPromptQueueChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _bindAppListener();
+      unawaited(_switchSessionProfile(AppScope.of(context).activeModelId, initial: true));
+    });
+  }
+
+  void _bindAppListener() {
+    final app = AppScope.of(context);
+    _app = app;
+    if (_appListener != null) return;
+    _appListener = () {
+      final id = app.activeModelId;
+      if (id != _sessionProfileId) {
+        unawaited(_switchSessionProfile(id));
+      }
+    };
+    app.addListener(_appListener!);
+  }
+
+  Future<void> _switchSessionProfile(String? profileId, {bool initial = false}) async {
+    if (!initial && _sessionProfileId != null) {
+      await _persistSession();
+    }
+    _sessionProfileId = profileId;
+    if (profileId == null || !mounted) {
+      await _chat.setMessages([]);
+      return;
+    }
+    await _restoreSession(profileId);
+  }
+
+  Future<void> _restoreSession(String profileId) async {
+    final snap = await _sessionStore.load(profileId);
+    if (!mounted) return;
+
+    if (snap == null) {
+      _openAiHist
+        ..clear()
+        ..add({'role': 'system', 'content': _systemPrompt});
+      _anthropicHist.clear();
+      _geminiHist.clear();
+      await _chat.setMessages([]);
+      return;
+    }
+
+    _openAiHist
+      ..clear()
+      ..addAll(
+        snap.openAiHist.isEmpty
+            ? [
+                {'role': 'system', 'content': _systemPrompt},
+              ]
+            : snap.openAiHist,
+      );
+    _anthropicHist
+      ..clear()
+      ..addAll(snap.anthropicHist);
+    _geminiHist
+      ..clear()
+      ..addAll(snap.geminiHist);
+    await _chat.setMessages(snap.uiMessages);
+  }
+
+  Future<void> _persistSession() async {
+    final profileId = _sessionProfileId;
+    if (profileId == null) return;
+
+    final ui = _chat.messages.where((m) {
+      if (m is! TextMessage) return false;
+      final t = m.text.trim();
+      return t.isNotEmpty && t != '…';
+    }).toList();
+
+    await _sessionStore.save(
+      profileId: profileId,
+      uiMessages: ui,
+      openAiHist: List<Map<String, dynamic>>.from(_openAiHist),
+      anthropicHist: List<Map<String, dynamic>>.from(_anthropicHist),
+      geminiHist: List<Map<String, dynamic>>.from(_geminiHist),
+    );
   }
 
   @override
   void dispose() {
+    unawaited(_persistSession());
+    if (_appListener != null) {
+      _app?.removeListener(_appListener!);
+    }
     widget.promptQueue.removeListener(_onPromptQueueChanged);
     _chat.dispose();
     super.dispose();
@@ -320,7 +411,10 @@ class _MemChatPageState extends State<MemChatPage> {
         );
       }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() => _busy = false);
+        unawaited(_persistSession());
+      }
     }
   }
 
@@ -330,10 +424,13 @@ class _MemChatPageState extends State<MemChatPage> {
         _openAiHist
           ..clear()
           ..add({'role': 'system', 'content': _systemPrompt});
+        break;
       case 'anthropic':
         _anthropicHist.clear();
+        break;
       case 'gemini':
         _geminiHist.clear();
+        break;
     }
   }
 
