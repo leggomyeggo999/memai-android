@@ -68,12 +68,11 @@ flutter {
     source = "../.."
 }
 
-// home_widget pulls `glance-appwidget:1.+`; pin to avoid alpha requiring compileSdk 37 / AGP 9.1.
-configurations.configureEach {
-    resolutionStrategy {
-        force("androidx.glance:glance-appwidget:1.1.1")
-    }
-}
+// NOTE: the pins for home_widget's open-ended `glance-appwidget:1.+` and
+// `work-runtime-ktx:2.+` ranges now live in android/build.gradle.kts under
+// `allprojects`. Declared here they only bound :app's own configurations and
+// never reached :home_widget's compile classpath, so the plugin still resolved
+// the alpha/rc artifacts. See the comment there before changing either version.
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
