@@ -923,6 +923,50 @@ const int _kShowcasePages = 5;
 void main() {
   setUpAll(loadMemGoldenFonts);
 
+  // Guards the spinner pose the goldens are captured at.
+  //
+  // `InlineSpinner`'s `CircularProgressIndicator` is indeterminate, so its arc
+  // length is a function of its controller phase — and near the ends of the
+  // 1333 ms sweep the arc collapses to a ~2 px dash that reads as a broken
+  // component in a review image. `memGoldenTheme` parks every spinner at
+  // [kMemGoldenSpinnerPhase]; this recomputes the arc from the SDK's own curves
+  // so a Flutter bump that changes them fails here, with an explanation, rather
+  // than quietly shipping specks again.
+  test('golden spinner phase is a wide, legible arc', () {
+    final double s = const SawTooth(
+      kMemGoldenSpinnerPathCount,
+    ).transform(kMemGoldenSpinnerPhase);
+    final double head = const Interval(
+      0.0,
+      0.5,
+      curve: Curves.fastOutSlowIn,
+    ).transform(s);
+    final double tail = const Interval(
+      0.5,
+      1.0,
+      curve: Curves.fastOutSlowIn,
+    ).transform(s);
+    // `_CircularProgressIndicatorPainter`: arcSweep = (head - tail) * 3/2 * pi.
+    final double sweepDegrees = (head - tail) * 270.0;
+    expect(
+      sweepDegrees,
+      greaterThan(260.0),
+      reason:
+          'the harness spinner phase no longer lands on a near-maximal arc; '
+          'recheck _strokeHeadTween/_strokeTailTween in the SDK',
+    );
+
+    // …and that the phase is actually wired into the themes the goldens use.
+    for (final (_, bool dark) in kMemGoldenThemes) {
+      final AnimationController? c = memGoldenTheme(
+        dark ? memDarkTheme : memLightTheme,
+      ).progressIndicatorTheme.controller;
+      expect(c, isNotNull);
+      expect(c!.value, kMemGoldenSpinnerPhase);
+      expect(c.isAnimating, isFalse);
+    }
+  });
+
   for (final (String themeName, bool dark) in kMemGoldenThemes) {
     final ThemeData theme = dark ? memDarkTheme : memLightTheme;
 

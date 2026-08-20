@@ -16,6 +16,17 @@ import 'hairline.dart';
 /// (§2.11) because they force a `saveLayer` every frame. One
 /// `AnimationController` drives a whole [SkeletonList]; the rows read the
 /// current alpha out of an inherited scope.
+///
+/// **Why the row rules are `outline`, not `outlineVariant` (§2.7).** In a
+/// loaded [AppListSection] the row rhythm is carried by the text — title,
+/// snippet, tags — and `outlineVariant` only *decorates* a boundary the reader
+/// already perceives; 1.5 : 1 is enough for that job. A skeleton has no text.
+/// The rule is the **only** thing dividing one placeholder surface from the
+/// next, so here it is doing boundary duty, and §2.7 assigns boundary duty to
+/// `outline` (≥3 : 1 against its host — 3.2 : 1 on dark `surfaceContainerLow`,
+/// 3.6 : 1 on light). With `outlineVariant` the dark skeleton collapsed into one
+/// continuous grey block and stopped previewing the shape of the arriving
+/// content. Same token in both themes, so the rows read as discrete in both.
 class SkeletonList extends StatelessWidget {
   const SkeletonList({
     super.key,
@@ -31,6 +42,10 @@ class SkeletonList extends StatelessWidget {
   /// `surfaceContainerLow`, radius 12, 1 dp `outline` — so the section does not
   /// pop into existence when the data lands. Off for a bare tail of rows
   /// appended inside an existing section.
+  ///
+  /// Row rules are drawn either way: a tail of three placeholder rows with no
+  /// rules between them is exactly the continuous-grey-block failure this
+  /// component exists to avoid.
   final bool inSection;
 
   @override
@@ -38,14 +53,29 @@ class SkeletonList extends StatelessWidget {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final List<Widget> rows = <Widget>[];
     for (int i = 0; i < rowCount; i++) {
-      if (i > 0 && inSection) {
-        rows.add(const Hairline(indent: MemSpace.dividerIndent));
+      if (i > 0) {
+        // `outline`, not the `Hairline` default — see the class doc. The rule
+        // is the only thing separating two contentless surfaces here, so it is
+        // a boundary, not a decorative divider.
+        rows.add(
+          Hairline(color: cs.outline, indent: MemSpace.dividerIndent),
+        );
       }
       rows.add(SkeletonRow(height: rowHeight));
     }
 
     final Widget column = Column(
       mainAxisSize: MainAxisSize.min,
+      // `stretch`, and it is load-bearing. A [Hairline] is a `SizedBox(height:)`
+      // wrapping a childless `ColoredBox`, which takes the *smallest* width its
+      // constraints allow. Under `Column`'s default `center` cross-alignment
+      // those constraints are loose, so every rule collapsed to zero width: the
+      // rows still reserved the 1 dp of vertical space but nothing was painted,
+      // and the skeleton went back to being one continuous block. Stretching
+      // gives the rules a tight width. `AppListSection` does the same, for the
+      // same reason — the two must match or the swap to loaded content moves
+      // the boundaries.
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: rows,
     );
 
@@ -74,6 +104,12 @@ class SkeletonList extends StatelessWidget {
 /// One placeholder row, shaped to the real row geometry: a 60 % title bar, two
 /// snippet bars, a tag stub, and a time stub.
 ///
+/// **Geometry is copied from `AppRow`, not approximated** — 16 dp horizontal /
+/// `sectionPadV` vertical padding, and [height] as a *minimum* rather than a
+/// fixed box, which is `AppRow`'s own contract. The bars therefore land on the
+/// same baselines the real title, snippet and meta row will occupy, so the
+/// swap to loaded content does not shift anything.
+///
 /// Inside a [SkeletonList] it shares the list's single pulse; standalone (the
 /// three tail rows of an infinite-scroll append) it brings its own.
 class SkeletonRow extends StatelessWidget {
@@ -94,18 +130,23 @@ class SkeletonRow extends StatelessWidget {
 
     final ColorScheme cs = Theme.of(context).colorScheme;
     final Color ink = cs.surfaceContainerHigh.withValues(alpha: alpha);
-    // Below ~64 dp there is no room for the snippet lines; degrade rather than
-    // overflow (settings/single-line rows use this).
-    final bool compact = height < MemSize.rowSingleLine;
+    // The title + two snippet bars + meta stub only fit a 76 dp note row once
+    // AppRow's 12 dp vertical padding is paid for. Anything shorter is a
+    // settings or single-line row, which really is one line of text — degrade
+    // to the title bar rather than overflow the row.
+    final bool compact = height < MemSize.rowNote;
 
-    return SizedBox(
-      height: height,
+    return ConstrainedBox(
+      // A minimum, never a fixed height — the same contract AppRow states, so
+      // neither side of the swap can clip the other.
+      constraints: BoxConstraints(minHeight: height),
       child: Padding(
         padding: const EdgeInsets.symmetric(
-          horizontal: MemSpace.sectionPadH,
-          vertical: MemSpace.x2 + 2,
+          horizontal: MemSpace.x4,
+          vertical: MemSpace.sectionPadV,
         ),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[

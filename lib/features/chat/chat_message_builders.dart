@@ -56,9 +56,10 @@ const String kMemChatPendingSentinel = '…';
 /// part of the message text; only the *rendering* changes in this redesign.
 const String kMemChatErrorPrefix = 'Error: ';
 
-// Motion, page gutter, block radius and touch target all come from
-// `lib/theme/mem_metrics.dart` (§2.8 / §2.9 / §2.11) — see `MemMotion`,
-// `MemInsets.pageH`, `MemSpace`, `MemRadius.section` and `MemSize.touchTarget`.
+// Motion, page gutter, block radius, hairline width and touch target all come
+// from `lib/theme/mem_metrics.dart` (§2.7 / §2.8 / §2.9 / §2.11) — see
+// `MemMotion`, `MemInsets.pageH`, `MemSpace`, `MemRadius.section`,
+// `hairlineWidth` and `MemSize.touchTarget`.
 // The only constants declared here are the ones §4.5 fixes for the chat surface
 // specifically and that have no token counterpart.
 
@@ -82,7 +83,8 @@ const double _kUserBubbleMaxWidthFactor = 0.78;
 
 /// The five shapes a chat row can take (§4.5).
 enum MemChatRowKind {
-  /// Right-aligned bubble, `surfaceContainerHigh`.
+  /// Right-aligned bubble: `surfaceContainerHigh` with a 1 dp `outline`
+  /// boundary hairline.
   user,
 
   /// Full-width block on the canvas with a header row.
@@ -584,8 +586,19 @@ class MemAssistantBlock extends StatelessWidget {
   }
 }
 
-/// A right-aligned user bubble: `surfaceContainerHigh`, radius 16 with a 4 dp
-/// bottom-right corner, capped at 78 % of the content width (§4.5).
+/// A right-aligned user bubble: `surfaceContainerHigh` **plus a 1 dp `outline`
+/// boundary hairline**, radius 16 with a 4 dp bottom-right corner, capped at
+/// 78 % of the content width (§4.5).
+///
+/// The hairline is not decoration. §2.7 defines depth as *a surface step plus a
+/// hairline*, and the step alone does not survive the light theme: there
+/// `surface` is `#FBFBFC` and `surfaceContainerHigh` is `#EBECF0`, so a bubble
+/// carrying only the tonal step reads as an almost-invisible grey block against
+/// the canvas. `outline` is the **boundary** token (≥3:1 against its host in
+/// both themes), which is exactly the job here — the bubble is a distinct
+/// surface sitting directly on the conversation ground, like the search pill or
+/// a list section, not a row divider inside an already-bounded container.
+/// Elevation and shadows are not an option (§0.1 rule 1).
 class MemUserBubble extends StatelessWidget {
   /// Creates a user bubble.
   const MemUserBubble({super.key, required this.text, this.onLongPress});
@@ -600,6 +613,9 @@ class MemUserBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    // Snapped to whole physical pixels so the boundary can neither vanish on
+    // mdpi nor fatten on a fractional dpr (§2.7).
+    final double hairline = hairlineWidth(context);
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -620,6 +636,10 @@ class MemUserBubble extends StatelessWidget {
                 ),
                 decoration: BoxDecoration(
                   color: cs.surfaceContainerHigh,
+                  // Tonal step + boundary hairline. Never elevation, never a
+                  // shadow (§0.1 rule 1, §2.7). `outline`, not `outlineVariant`:
+                  // this is a boundary, not an in-section divider.
+                  border: Border.all(color: cs.outline, width: hairline),
                   borderRadius: const BorderRadius.only(
                     topLeft: Radius.circular(_kBubbleRadius),
                     topRight: Radius.circular(_kBubbleRadius),

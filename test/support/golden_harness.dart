@@ -146,6 +146,64 @@ String _join(String a, String b) {
 /// face, and `kMemSansFallback` pins that to Roboto first.
 const String _kGoldenFamily = 'Roboto';
 
+// ---------------------------------------------------------------------------
+// Spinner phase
+// ---------------------------------------------------------------------------
+
+/// Number of "path" cycles `CircularProgressIndicator` packs into one turn of
+/// its controller.
+///
+/// From `material/progress_indicator.dart`: the indeterminate controller runs
+/// for `_kIndeterminateCircularDuration = 1333 * 2222` ms and
+/// `_pathCount = _kIndeterminateCircularDuration ~/ 1333`, i.e. 2222 sweeps of
+/// 1333 ms each.
+const int kMemGoldenSpinnerPathCount = 2222;
+
+/// The controller phase at which the indeterminate arc is at its **longest**.
+///
+/// Everything `_CircularProgressIndicatorPainter` draws is a pure function of
+/// `controller.value`. Let `s = SawTooth(_pathCount).transform(value)` be the
+/// position inside one 1333 ms sweep; then
+///
+/// ```text
+/// head  = Interval(0.0, 0.5, curve: fastOutSlowIn).transform(s)
+/// tail  = Interval(0.5, 1.0, curve: fastOutSlowIn).transform(s)
+/// sweep = (head - tail) * 3 / 2 * pi
+/// ```
+///
+/// `head` finishes climbing to 1.0 exactly at `s == 0.5`, which is also the
+/// last instant before `tail` leaves 0.0 — so `s == 0.5` is the single frame
+/// where the arc is a full 3/2 pi (270 degree) "C". Either side of it the arc
+/// is shorter, and near `s == 0` or `s == 1` it collapses to the ~2 px dash
+/// that made these goldens look like a broken component.
+///
+/// `s == 0.5` therefore means `value == 0.5 / _pathCount`.
+const double kMemGoldenSpinnerPhase = 0.5 / kMemGoldenSpinnerPathCount;
+
+AnimationController? _spinnerController;
+
+/// A **stopped** controller parked at [kMemGoldenSpinnerPhase].
+///
+/// Injected into `ProgressIndicatorThemeData.controller` by [memGoldenTheme],
+/// which is what every `CircularProgressIndicator` under the golden
+/// `MaterialApp` resolves to when it has no `controller` of its own (see
+/// `_CircularProgressIndicatorState._controller`). Because it never ticks, the
+/// painted phase no longer depends on *when* the spinner's element happened to
+/// be built — which is the whole bug: [resolveMaxScrollExtent] and the per-page
+/// `jumpTo` calls build and dispose lazy `ListView` children repeatedly, so a
+/// self-driven controller started at a different moment on every page landed on
+/// a different, sometimes invisible, point of the sweep.
+///
+/// One instance for the whole process: it owns no started `Ticker`, so there is
+/// nothing to leak, and sharing it keeps every spinner in every golden at the
+/// identical pose.
+AnimationController get memGoldenSpinnerController =>
+    _spinnerController ??= AnimationController(
+      vsync: const TestVSync(),
+      duration: CircularProgressIndicator.defaultAnimationDuration,
+      value: kMemGoldenSpinnerPhase,
+    );
+
 /// Returns [theme] with an explicit `fontFamily` on every text style that had
 /// none.
 ///
@@ -162,6 +220,12 @@ const String _kGoldenFamily = 'Roboto';
 /// Pinning the null families to `Roboto` reproduces exactly what Android's font
 /// manager does with `fontFamily: null` on a device, so the goldens still show
 /// the shipped type ramp — same sizes, weights, tracking, and tabular figures.
+///
+/// It also parks every indeterminate `CircularProgressIndicator` on
+/// [memGoldenSpinnerController]. That is a capture-time concern only: the pose
+/// it freezes is a real frame of the real animation (the widest one), it does
+/// not change a single colour, size or stroke, and nothing in `lib/` is aware
+/// of it.
 ThemeData memGoldenTheme(ThemeData theme) {
   ButtonStyle? btn(ButtonStyle? s) =>
       s?.copyWith(textStyle: _pinProp(s.textStyle));
@@ -226,6 +290,9 @@ ThemeData memGoldenTheme(ThemeData theme) {
     tooltipTheme: theme.tooltipTheme.copyWith(
       textStyle: _pin(theme.tooltipTheme.textStyle),
     ),
+    progressIndicatorTheme: theme.progressIndicatorTheme.copyWith(
+      controller: memGoldenSpinnerController,
+    ),
   );
 }
 
@@ -264,7 +331,9 @@ void sizeGoldenView(
 ///
 /// Deliberately **no `pumpAndSettle`**: `SkeletonList`, `InlineSpinner` and
 /// `MemTypingDots` all own repeating `AnimationController`s, so a settle would
-/// spin until the 10-minute timeout. Frames are advanced by a fixed number of
+/// spin until the 10-minute timeout. (`InlineSpinner` still *starts* its
+/// internal controller even though [memGoldenTheme] hands it a parked one to
+/// paint from, so this stays true.) Frames are advanced by a fixed number of
 /// fixed-length pumps instead, which is also what makes the pulse phase (and
 /// therefore the image) reproducible.
 Future<void> pumpMemGolden(

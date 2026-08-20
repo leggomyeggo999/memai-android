@@ -165,6 +165,9 @@ class AppRow extends StatelessWidget {
   });
 
   /// <=24 dp glyph or a `CollectionTag(dot)`.
+  ///
+  /// Aligned to the **title line**, not to the row: on a two-line row it sits
+  /// beside the title, never beside the snippet.
   final Widget? leading;
 
   /// Styled `titleMedium`, 1 line, ellipsis — a bare `Text` inherits all three.
@@ -205,8 +208,10 @@ class AppRow extends StatelessWidget {
     final ColorScheme scheme = theme.colorScheme;
     final TextTheme text = theme.textTheme;
 
+    final TextScaler scaler = MediaQuery.textScalerOf(context);
+
     // The degradation trigger: how far a 14 dp body line has been stretched.
-    final double scaled = MediaQuery.textScalerOf(context).scale(14);
+    final double scaled = scaler.scale(14);
     final AppRowDensity density = scaled > 14 * 1.6
         ? AppRowDensity.condensed
         : scaled > 14 * 1.3
@@ -214,7 +219,9 @@ class AppRow extends StatelessWidget {
         : AppRowDensity.normal;
 
     // Reduced emphasis is a colour token, not an opacity layer.
-    final Color titleColor = enabled ? scheme.onSurface : scheme.onSurfaceVariant;
+    final Color titleColor = enabled
+        ? scheme.onSurface
+        : scheme.onSurfaceVariant;
     final Color secondaryColor = enabled
         ? scheme.onSurfaceVariant
         : scheme.outline;
@@ -270,26 +277,53 @@ class AppRow extends StatelessWidget {
         ..add(Align(alignment: Alignment.centerRight, child: trailingTextSlot));
     }
 
-    final List<Widget> rowChildren = <Widget>[];
-    if (leading != null) {
-      rowChildren
-        ..add(
-          IconTheme.merge(
-            data: IconThemeData(size: 24, color: secondaryColor),
-            child: leading!,
-          ),
-        )
-        ..add(const SizedBox(width: MemSpace.x3));
-    }
-    rowChildren.add(
-      Expanded(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: column,
-        ),
-      ),
+    final Widget contentColumn = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: column,
     );
+
+    // The leading slot belongs to the TITLE, not to the row. Centring it
+    // against the whole row floats a dot or glyph down beside the snippet on
+    // any two-line row. So: the leading + content pair is top-aligned, and the
+    // leading sits in a box exactly one `titleMedium` line tall and is
+    // optically centred inside it. Because the box is derived from the live
+    // text scaler it tracks the title line at every scale, and a <=24 dp glyph
+    // stays centred on the title whether the row is one line, two lines, or
+    // carries tags underneath. `trailingText`, the selection check and
+    // `trailing` stay centred against the row — they are row-level, not
+    // title-level — so the outer row keeps `center`.
+    final double titleLine =
+        scaler.scale(text.titleMedium?.fontSize ?? 16) *
+        (text.titleMedium?.height ?? 22 / 16);
+
+    final Widget leadingAndContent = leading == null
+        ? contentColumn
+        : Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              SizedBox(
+                height: titleLine,
+                // `Center` loosens the constraint, so a leading widget taller
+                // than the line box (a 24 dp glyph against a 22 dp line) keeps
+                // its own size and overhangs symmetrically instead of being
+                // squashed or clipped.
+                child: Center(
+                  widthFactor: 1,
+                  child: IconTheme.merge(
+                    data: IconThemeData(size: 24, color: secondaryColor),
+                    child: leading!,
+                  ),
+                ),
+              ),
+              const SizedBox(width: MemSpace.x3),
+              Expanded(child: contentColumn),
+            ],
+          );
+
+    final List<Widget> rowChildren = <Widget>[
+      Expanded(child: leadingAndContent),
+    ];
     if (trailingTextInline) {
       rowChildren
         ..add(const SizedBox(width: MemSpace.x2))
@@ -318,6 +352,8 @@ class AppRow extends StatelessWidget {
         vertical: MemSpace.sectionPadV,
       ),
       child: Row(
+        // Row-level slots centre; the leading slot does not — see
+        // [leadingAndContent] above.
         crossAxisAlignment: CrossAxisAlignment.center,
         children: rowChildren,
       ),
