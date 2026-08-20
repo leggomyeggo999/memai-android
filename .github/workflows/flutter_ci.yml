@@ -19,11 +19,17 @@ jobs:
 
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
-      - run: flutter test
+      # Goldens are excluded on CI: the runner's SDK lacks the material_fonts
+      # cache the golden harness loads Roboto from, and cross-OS font
+      # rasterization makes Windows-generated PNGs fail pixel comparison on
+      # Linux anyway. They are run/regenerated locally — see dart_test.yaml.
+      - run: flutter test --exclude-tags=golden
 
   integration-android:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Historically marginal at 30: emulator boot alone has taken 7+ minutes on
+    # these runners, plus ~6 min of Gradle and an 80+ s install.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 

@@ -543,7 +543,10 @@ jobs:
       # string. github.run_number is monotonic for this workflow. See
       # docs/RELEASING.md if you ever need to offset it.
       BUILD_NUMBER: ${{ github.run_number }}
-      KEYCHAIN_PATH: ${{ runner.temp }}/memdroid-signing.keychain-db
+      # NOTE: the `runner` context is NOT available in job-level env (GitHub
+      # rejects the whole workflow file at parse time with "Unrecognized
+      # named-value: 'runner'"), so KEYCHAIN_PATH is exported to GITHUB_ENV by
+      # the signing step below instead of being declared here.
       IOS_BUNDLE_ID: com.memai.memaiAndroid
     steps:
       - uses: actions/checkout@v4
@@ -570,6 +573,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # Declared here (not in job-level env) because the `runner` context is
+          # unavailable there — see the note on the job's env block.
+          KEYCHAIN_PATH="${RUNNER_TEMP}/memdroid-signing.keychain-db"
+          echo "KEYCHAIN_PATH=${KEYCHAIN_PATH}" >> "$GITHUB_ENV"
 
           # Random, single-use keychain password — never a repository secret.
           KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
@@ -754,7 +762,10 @@ jobs:
         if: always()
         shell: bash
         run: |
-          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          # KEYCHAIN_PATH is only in the env once the signing step has run.
+          if [[ -n "${KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          fi
           rm -rf "$HOME/Library/MobileDevice/Provisioning Profiles" || true
           rm -rf "$HOME/private_keys" "$HOME/.appstoreconnect/private_keys" || true
           rm -f "${RUNNER_TEMP}/dist-cert.p12" \

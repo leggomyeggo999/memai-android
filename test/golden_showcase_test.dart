@@ -11,6 +11,15 @@
 //
 // Fonts: see `test/support/golden_harness.dart`. Without it every glyph would be
 // a filled box and these images would be useless.
+//
+// Tagged `golden` and EXCLUDED on CI (.github/workflows/flutter_ci.yml runs
+// `flutter test --exclude-tags=golden`): the ubuntu runner's Flutter SDK never
+// downloads the material_fonts cache the harness loads Roboto from, and even
+// with fonts present, PNGs generated on Windows do not match Linux font
+// rasterization pixel-for-pixel. Goldens are a locally-verified review
+// artifact, regenerated and compared on the machine that authored them.
+@Tags(<String>['golden'])
+library;
 
 import 'dart:async';
 
