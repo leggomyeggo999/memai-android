@@ -193,8 +193,14 @@ class CollectionTag extends StatelessWidget {
       button: onTap != null,
       selected: selected,
       label: title,
-      child: SizedBox(
-        height: MemSize.touchTarget,
+      // Both axes. `Center(widthFactor: 1)` shrink-wraps the visual's width, so
+      // a height-only box leaves a short title — a 1–2 character collection in
+      // the 24 dp `tag` variant — under 48 dp horizontally.
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          minWidth: MemSize.touchTarget,
+          minHeight: MemSize.touchTarget,
+        ),
         child: Material(
           type: MaterialType.transparency,
           child: InkWell(
@@ -249,8 +255,12 @@ class CollectionOverflowTag extends StatelessWidget {
     return Semantics(
       button: true,
       label: '$count more collections',
-      child: SizedBox(
-        height: MemSize.touchTarget,
+      // Same both-axes minimum: `+9` is narrower than 48 dp on its own.
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          minWidth: MemSize.touchTarget,
+          minHeight: MemSize.touchTarget,
+        ),
         child: Material(
           type: MaterialType.transparency,
           child: InkWell(

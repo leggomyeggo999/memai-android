@@ -27,6 +27,8 @@ import 'package:flutter/foundation.dart' show setEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_chat_core/flutter_chat_core.dart';
 
+import '../../theme/mem_metrics.dart';
+
 // ---------------------------------------------------------------------------
 // Contract constants. These mirror `mem_chat_page.dart` and must stay
 // byte-identical to it — they are persistence contracts, not copy.
@@ -54,22 +56,25 @@ const String kMemChatPendingSentinel = '…';
 /// part of the message text; only the *rendering* changes in this redesign.
 const String kMemChatErrorPrefix = 'Error: ';
 
-// Mirrors `MemMotion` (§2.11), which lives in `lib/theme/mem_metrics.dart` and is
-// owned by WP-0 — that file did not exist when WP-S landed. The values are
-// identical; swap these three for the real tokens once WP-0 is in.
-const Duration _kMotionStandard = Duration(milliseconds: 220);
-const Duration _kMotionPulse = Duration(milliseconds: 1100);
-const Curve _kCurveEmphasized = Curves.easeOutCubic;
-const Curve _kCurvePulse = Curves.easeInOut;
+// Motion, page gutter, block radius and touch target all come from
+// `lib/theme/mem_metrics.dart` (§2.8 / §2.9 / §2.11) — see `MemMotion`,
+// `MemInsets.pageH`, `MemSpace`, `MemRadius.section` and `MemSize.touchTarget`.
+// The only constants declared here are the ones §4.5 fixes for the chat surface
+// specifically and that have no token counterpart.
 
-// Layout constants from §2.8 / §2.9.
-const double _kPageInset = 16; // MemInsets.pageH
-const double _kAssistantBodyInset = 20; // §4.5: 20 dp left inset on the block
+/// §4.5: 20 dp left inset on the assistant block (16 dp glyph + 4 dp gap).
+const double _kAssistantBodyInset = 20;
+
+/// §4.5: the user bubble's corner radius. Numerically `MemRadius.dialog`, but
+/// semantically a bubble, not a dialog — kept local so a change to the dialog
+/// token cannot silently reshape chat rows.
 const double _kBubbleRadius = 16;
+
+/// §4.5: the tightened bottom-right "tail" corner on the user bubble.
 const double _kBubbleTailRadius = 4;
-const double _kBlockRadius = 12;
-const double _kTouchTarget = 48; // §0.1 rule 4
-const double _kUserBubbleMaxWidthFactor = 0.78; // §4.5
+
+/// §4.5: user bubbles are capped at 78 % of the content width.
+const double _kUserBubbleMaxWidthFactor = 0.78;
 
 // ---------------------------------------------------------------------------
 // Row classification
@@ -333,15 +338,15 @@ class MemChatMessageWrapper extends StatelessWidget {
     // disposing; SizeTransition alone (no FadeTransition) keeps the frame free of
     // a saveLayer, per the §2.11 cost budget.
     return SizeTransition(
-      sizeFactor: animation.drive(CurveTween(curve: _kCurveEmphasized)),
+      sizeFactor: animation.drive(CurveTween(curve: MemMotion.emphasized)),
       // Top-anchored: the row grows downwards instead of sliding out of its own
       // centre. (`axisAlignment: -1` in the pre-3.41 API.)
       alignment: AlignmentDirectional.topStart,
       child: Padding(
         padding: EdgeInsets.fromLTRB(
-          _kPageInset,
-          index == 0 ? 8 : _kPageInset,
-          _kPageInset,
+          MemInsets.pageH,
+          index == 0 ? MemSpace.x2 : MemInsets.pageH,
+          MemInsets.pageH,
           0,
         ),
         child: child,
@@ -506,7 +511,7 @@ class MemAssistantBlock extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         SizedBox(
-          height: _kTouchTarget,
+          height: MemSize.touchTarget,
           child: Row(
             children: [
               // 16 dp glyph + 4 dp gap = the 20 dp inset the body aligns to.
@@ -548,14 +553,14 @@ class MemAssistantBlock extends StatelessWidget {
               ),
               if (onOpenMenu != null)
                 SizedBox(
-                  width: _kTouchTarget,
-                  height: _kTouchTarget,
+                  width: MemSize.touchTarget,
+                  height: MemSize.touchTarget,
                   child: IconButton(
                     padding: EdgeInsets.zero,
                     iconSize: 20,
                     constraints: const BoxConstraints.tightFor(
-                      width: _kTouchTarget,
-                      height: _kTouchTarget,
+                      width: MemSize.touchTarget,
+                      height: MemSize.touchTarget,
                     ),
                     tooltip: 'Message actions',
                     color: cs.onSurfaceVariant,
@@ -698,10 +703,17 @@ class MemErrorRow extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       onLongPress: onLongPress,
       child: Container(
-        padding: EdgeInsets.fromLTRB(14, 12, onRetry == null ? 14 : 4, 12),
+        padding: EdgeInsets.fromLTRB(
+          MemSpace.sectionPadH,
+          MemSpace.sectionPadV,
+          // The retry button carries its own 48 dp target, so the trailing pad
+          // shrinks to the 4 dp grid step rather than doubling up.
+          onRetry == null ? MemSpace.sectionPadH : MemSpace.x1,
+          MemSpace.sectionPadV,
+        ),
         decoration: BoxDecoration(
           color: cs.errorContainer,
-          borderRadius: BorderRadius.circular(_kBlockRadius),
+          borderRadius: MemRadius.sectionAll,
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
@@ -718,14 +730,14 @@ class MemErrorRow extends StatelessWidget {
             ),
             if (onRetry != null)
               SizedBox(
-                width: _kTouchTarget,
-                height: _kTouchTarget,
+                width: MemSize.touchTarget,
+                height: MemSize.touchTarget,
                 child: IconButton(
                   padding: EdgeInsets.zero,
                   iconSize: 20,
                   constraints: const BoxConstraints.tightFor(
-                    width: _kTouchTarget,
-                    height: _kTouchTarget,
+                    width: MemSize.touchTarget,
+                    height: MemSize.touchTarget,
                   ),
                   tooltip: 'Retry',
                   color: cs.onErrorContainer,
@@ -773,7 +785,7 @@ class _MemTypingDotsState extends State<MemTypingDots>
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: _kMotionPulse)
+    _controller = AnimationController(vsync: this, duration: MemMotion.skeleton)
       ..repeat(reverse: true);
   }
 
@@ -798,7 +810,7 @@ class _MemTypingDotsState extends State<MemTypingDots>
             mainAxisSize: MainAxisSize.min,
             children: List<Widget>.generate(3, (i) {
               final start = i * 0.2;
-              final t = _kCurvePulse.transform(
+              final t = MemMotion.pulse.transform(
                 ((_controller.value - start) / 0.6).clamp(0.0, 1.0),
               );
               return Padding(
@@ -842,8 +854,8 @@ class MemStreamingCaret extends StatelessWidget {
     // Permitted AI-provenance site (§2.10): the streaming caret.
     final color = Theme.of(context).colorScheme.tertiary;
     return AnimatedContainer(
-      duration: _kMotionStandard,
-      curve: _kCurveEmphasized,
+      duration: MemMotion.standard,
+      curve: MemMotion.emphasized,
       margin: EdgeInsets.only(left: active ? 3 : 0),
       width: active ? 2 : 0,
       height: height,

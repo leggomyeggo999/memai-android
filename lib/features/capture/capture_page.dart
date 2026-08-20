@@ -378,8 +378,14 @@ class _CapturePageState extends State<CapturePage> with AsyncPageMixin {
   // Voice
   // ---------------------------------------------------------------------------
 
-  Future<String?> _resolveOpenAiKey() async {
-    final app = AppScope.of(context);
+  /// Resolution order is contractual: `voiceOpenAiApiKey` → the active chat
+  /// model when its provider is `openai` → the first openai model → the vault
+  /// entry for that profile id.
+  ///
+  /// [app] is passed in rather than read from `context` because every caller
+  /// reaches here *after* an await (the recorder stop), and an `AppScope` read
+  /// on a deactivated element throws.
+  Future<String?> _resolveOpenAiKey(AppState app) async {
     if (app.voiceOpenAiApiKey != null && app.voiceOpenAiApiKey!.isNotEmpty) {
       return app.voiceOpenAiApiKey;
     }
@@ -404,22 +410,33 @@ class _CapturePageState extends State<CapturePage> with AsyncPageMixin {
     return app.vault.getLlmApiKey(profileId);
   }
 
-  Future<void> _appendTranscriptionFromFile(String filePath) async {
-    final messenger = ScaffoldMessenger.of(context);
-    final app = AppScope.of(context);
+  /// [messenger] and [app] are captured by the caller **before** it awaits the
+  /// recorder, per the app-wide async-hygiene contract: by the time this runs
+  /// the element may be gone, so nothing here may reach back into `context`
+  /// without a `mounted` check.
+  ///
+  /// The whole body — key resolution included — sits inside the `try`, because
+  /// the temp file must be deleted in `finally` **regardless of outcome**. The
+  /// no-key bail-out used to return before the `try` and orphan the recording
+  /// in the temp directory on every take until the user visited Settings.
+  Future<void> _appendTranscriptionFromFile(
+    String filePath,
+    ScaffoldMessengerState messenger,
+    AppState app,
+  ) async {
     final voiceModel = app.voiceWhisperModel;
-    final key = await _resolveOpenAiKey();
-    if (key == null || key.isEmpty) {
-      if (mounted) {
-        memSnack(
-          messenger,
-          'Add an OpenAI chat model + API key in Settings first.',
-        );
-      }
-      return;
-    }
-    setState(() => _transcribing = true);
     try {
+      final key = await _resolveOpenAiKey(app);
+      if (key == null || key.isEmpty) {
+        ifMounted(
+          () => memSnack(
+            messenger,
+            'Add an OpenAI chat model + API key in Settings first.',
+          ),
+        );
+        return;
+      }
+      setStateIfMounted(() => _transcribing = true);
       final text = await OpenAiWhisperClient(apiKey: key).transcribeFile(
         File(filePath),
         prompt: _whisperPromptCtrl.text.trim().isEmpty
@@ -445,9 +462,9 @@ class _CapturePageState extends State<CapturePage> with AsyncPageMixin {
         _bodyCtrl.text = '$existing\n\n$normalized';
       }
     } catch (e) {
-      if (mounted) errSnack(messenger, e, context: context);
+      ifMounted(() => errSnack(messenger, e, context: context));
     } finally {
-      if (mounted) setState(() => _transcribing = false);
+      setStateIfMounted(() => _transcribing = false);
       try {
         final f = File(filePath);
         if (await f.exists()) await f.delete();
@@ -456,8 +473,11 @@ class _CapturePageState extends State<CapturePage> with AsyncPageMixin {
   }
 
   Future<void> _startRecording() async {
-    if (_recording || _transcribing || _busy) return;
-    final messenger = ScaffoldMessenger.of(context);
+    // `!mounted` belongs in the guard because the hold-to-talk path reaches
+    // here after an awaited haptic, and the messenger capture below is a
+    // `context` read.
+    if (_recording || _transcribing || _busy || !mounted) return;
+    final ScaffoldMessengerState messenger = messengerOf();
     if (!await _recorder.hasPermission()) {
       if (mounted) {
         memSnack(messenger, 'Microphone permission denied.');
@@ -475,7 +495,7 @@ class _CapturePageState extends State<CapturePage> with AsyncPageMixin {
       ),
       path: path,
     );
-    setState(() {
+    setStateIfMounted(() {
       _recording = true;
       _activeRecordPath = path;
       _recordingElapsed = Duration.zero;
@@ -498,17 +518,22 @@ class _CapturePageState extends State<CapturePage> with AsyncPageMixin {
   }
 
   Future<void> _stopRecordingAndTranscribe() async {
-    if (!_recording) return;
+    if (!_recording || !mounted) return;
+    // Capture-before-await (CONSTRAINTS §ASYNC HYGIENE): the transcription that
+    // follows `_recorder.stop()` needs a messenger and the AppState, and
+    // neither may be re-read from `context` once an await has intervened.
+    final ScaffoldMessengerState messenger = messengerOf();
+    final AppState app = _app ?? AppScope.of(context);
     _elapsedTimer?.cancel();
     _elapsedTimer = null;
     await _amplitudeSub?.cancel();
     _amplitudeSub = null;
     final path = await _recorder.stop();
-    setState(() => _recording = false);
+    setStateIfMounted(() => _recording = false);
     final p = path ?? _activeRecordPath;
     _activeRecordPath = null;
     if (p == null) return;
-    await _appendTranscriptionFromFile(p);
+    await _appendTranscriptionFromFile(p, messenger, app);
   }
 
   Future<void> _cancelRecording() async {
@@ -518,7 +543,7 @@ class _CapturePageState extends State<CapturePage> with AsyncPageMixin {
     await _amplitudeSub?.cancel();
     _amplitudeSub = null;
     await _recorder.cancel();
-    setState(() {
+    setStateIfMounted(() {
       _recording = false;
       _activeRecordPath = null;
       _recordingElapsed = Duration.zero;

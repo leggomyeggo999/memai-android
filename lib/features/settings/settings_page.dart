@@ -70,11 +70,6 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
   final TextEditingController _memKeySheetCtrl = TextEditingController();
   final TextEditingController _voiceKeySheetCtrl = TextEditingController();
 
-  /// The **masked** tails, captured post-frame. The full secret is never held
-  /// in widget state and never rendered.
-  String? _memKeyMask;
-  String? _voiceKeyMask;
-
   /// True while the OAuth browser round-trip is in flight — the pending tile
   /// that closes the dead-air gap.
   bool _mcpBusy = false;
@@ -86,14 +81,11 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
   @override
   void initState() {
     super.initState();
-    // Key reads are deferred to post-frame: `AppScope.of` registers an
-    // inherited dependency and must not run during initState. What is read
-    // here is the *presence* and the last three characters for masking —
-    // never the full value, and never into a visible field.
-    postFrame(() {
-      _syncMaskedKeys(AppScope.of(context));
-      _scrollTo(widget.focusSection);
-    });
+    // `AppScope.of` registers an inherited dependency and must not run during
+    // initState, so anything that needs it is deferred to post-frame. Key
+    // presence and masks are read in `build` from the same live [AppState]
+    // instead — see [_maskOf].
+    postFrame(() => _scrollTo(widget.focusSection));
   }
 
   @override
@@ -106,15 +98,20 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
 
   // ---------------------------------------------------------------- helpers
 
-  /// Re-reads presence + mask after a key mutation this page performed.
-  void _syncMaskedKeys(AppState app) {
-    final String? mem = app.memApiKey;
-    final String? voice = app.voiceOpenAiApiKey;
-    setStateIfMounted(() {
-      _memKeyMask = (mem == null || mem.isEmpty) ? null : memMaskedSecret(mem);
-      _voiceKeyMask = (voice == null || voice.isEmpty) ? null : memMaskedSecret(voice);
-    });
-  }
+  /// The masked tail of a stored secret, or null when nothing is stored.
+  ///
+  /// Presence **and** mask are derived from live [AppState] on every build,
+  /// never snapshotted into widget state: Settings is reachable from the
+  /// hydration gate, so a page built before `AppState.load()` resolves would
+  /// otherwise keep reporting "Not set" for a key that is in fact in the vault
+  /// — and the sheet's only delete affordance would never render. `AppScope`
+  /// is an `InheritedNotifier`, so hydration and every key write rebuild this
+  /// page and the tiles correct themselves on the next frame.
+  ///
+  /// Only the last three characters ever reach the tree ([memMaskedSecret]);
+  /// the full value is never held in widget state and never rendered.
+  static String? _maskOf(String? secret) =>
+      (secret == null || secret.isEmpty) ? null : memMaskedSecret(secret);
 
   void _scrollTo(SettingsSection? section) {
     if (section == null) return;
@@ -225,7 +222,6 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
   }) async {
     // Captured from the page, before anything async.
     final ScaffoldMessengerState messenger = messengerOf();
-    final AppState app = AppScope.of(context);
     final ColorScheme scheme = Theme.of(context).colorScheme;
 
     controller.clear();
@@ -282,7 +278,8 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
                         await write(null);
                         if (!sheetContext.mounted) return;
                         state.close();
-                        _syncMaskedKeys(app);
+                        // No local mask to refresh: `write` notifies AppState
+                        // and the page rebuilds off the live value.
                         memSnack(messenger, removedMessage);
                       },
                 style: TextButton.styleFrom(
@@ -304,7 +301,6 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
         await write(value);
         if (!sheetContext.mounted) return;
         sheet?.close();
-        _syncMaskedKeys(app);
         memSnack(messenger, savedMessage);
       },
     );
@@ -335,7 +331,9 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
       controller: _voiceKeySheetCtrl,
       fieldLabel: 'OpenAI API key',
       helperText: 'Uses your chat model key when empty.',
-      hasStoredKey: _voiceKeyMask != null,
+      // Live, exactly as the Mem sheet reads `app.hasMemRest`: a snapshot
+      // would hide the Remove action for a key stored before hydration.
+      hasStoredKey: app.voiceOpenAiApiKey?.isNotEmpty ?? false,
       write: app.setVoiceOpenAiApiKey,
       savedMessage: 'Voice key saved.',
       removedMessage: 'Voice key removed.',
@@ -428,6 +426,12 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
               key: ValueKey<String>(provider),
               initialValue: selected,
               isExpanded: true,
+              // `DropdownButton` defaults to elevation 8 and 2 dp corners, and
+              // no theme suppresses it (`dropdownMenuTheme` only reaches the M3
+              // `DropdownMenu`). Left unset the menu would paint the app's only
+              // BoxShadow — on top of an explicitly elevation-0 sheet (§0.1).
+              elevation: 0,
+              borderRadius: MemRadius.sectionAll,
               decoration: const InputDecoration(labelText: 'Model'),
               items: <DropdownMenuItem<CuratedChatModel>>[
                 for (final CuratedChatModel m in catalog)
@@ -577,7 +581,8 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
     final bool hasKey = app.hasMemRest;
     final bool hasModels = app.chatModels.isNotEmpty;
     final ChatModelProfile? active = _activeProfile(app);
-    final bool hasVoiceKey = _voiceKeyMask != null;
+    final String? voiceMask = _maskOf(app.voiceOpenAiApiKey);
+    final bool hasVoiceKey = voiceMask != null;
     final int count = app.chatModels.length;
 
     return AppListSection(
@@ -605,7 +610,7 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
           icon: Icons.mic_none_outlined,
           label: 'Voice',
           level: hasVoiceKey ? StatusLevel.ok : StatusLevel.neutral,
-          status: hasVoiceKey ? 'Key saved · $_voiceKeyMask' : 'Using chat key',
+          status: hasVoiceKey ? 'Key saved · $voiceMask' : 'Using chat key',
           detail: hasVoiceKey
               ? null
               : 'Falls back to your OpenAI chat model key.',
@@ -617,9 +622,10 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
 
   Widget _buildAccountSection(AppState app) {
     final bool hasKey = app.hasMemRest;
-    final String keyStatus = hasKey
-        ? (_memKeyMask == null ? 'Key saved' : 'Key saved · $_memKeyMask')
-        : 'Not set';
+    final String? memMask = _maskOf(app.memApiKey);
+    final String keyStatus = memMask == null
+        ? 'Not set'
+        : 'Key saved · $memMask';
 
     return AppListSection(
       header: SectionHeader(
@@ -738,7 +744,8 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
   }
 
   List<Widget> _buildVoiceSection(AppState app) {
-    final bool hasVoiceKey = _voiceKeyMask != null;
+    final String? voiceMask = _maskOf(app.voiceOpenAiApiKey);
+    final bool hasVoiceKey = voiceMask != null;
 
     return <Widget>[
       SectionHeader(key: _anchors[SettingsSection.voice], label: 'Voice'),
@@ -747,6 +754,10 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
         child: DropdownButtonFormField<String>(
           initialValue: app.voiceWhisperModel,
           isExpanded: true,
+          // Same shadow ban as the chat-model picker: elevation 0 and the
+          // section radius the popup menu theme already uses (§0.1 rule 1).
+          elevation: 0,
+          borderRadius: MemRadius.sectionAll,
           decoration: const InputDecoration(labelText: 'Transcription model'),
           items: <DropdownMenuItem<String>>[
             for (final (String id, String label) in _voiceModels)
@@ -764,7 +775,7 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
             icon: Icons.vpn_key_outlined,
             label: 'OpenAI key',
             level: hasVoiceKey ? StatusLevel.ok : StatusLevel.neutral,
-            status: hasVoiceKey ? 'Key saved · $_voiceKeyMask' : 'Not set',
+            status: hasVoiceKey ? 'Key saved · $voiceMask' : 'Not set',
             detail: 'Uses your chat model key when empty.',
             actionLabel: 'Edit',
             onAction: () => unawaited(_showVoiceKeySheet(app)),

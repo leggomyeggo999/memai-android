@@ -57,6 +57,20 @@ class _NotesPageState extends State<NotesPage> with AsyncPageMixin<NotesPage> {
   Object? _collectionsError;
   String? _filterCollectionId;
 
+  /// The `!alreadyLoaded` half of the idempotent lazy-load guard (§4.2).
+  ///
+  /// This must be an explicit flag, never `_items.isNotEmpty`: a completed
+  /// timeline load that legitimately returned zero rows (empty account, or a
+  /// filter that matches nothing) is indistinguishable from "never loaded" by
+  /// row count alone. Because [_tryInitialLoad] is reachable from every
+  /// `AppState` notification — the page depends on `AppScope`, so any
+  /// `notifyListeners` fires both [_onAppStateChanged] and
+  /// [didChangeDependencies] — a row-count proxy re-fetches on every theme
+  /// toggle or settings write and swaps the empty state for a skeleton each
+  /// time. Set only on a successful refresh; deliberately *not* set on error,
+  /// so a failed first load stays retryable through the same paths.
+  bool _didInitialLoad = false;
+
   /// Monotonic request counter for the timeline lane.
   ///
   /// Infinite scroll made an old race reachable: a `notesListRevision` bump can
@@ -145,7 +159,7 @@ class _NotesPageState extends State<NotesPage> with AsyncPageMixin<NotesPage> {
     final app = _app;
     if (app == null || !app.isHydrated || !app.hasMemRest) return;
     if (_loading || _loadingMore) return;
-    if (_items.isNotEmpty && _error == null) return;
+    if (_didInitialLoad && _error == null) return;
     unawaited(_loadNotes(refresh: true));
     unawaited(_loadCollections());
   }
@@ -296,6 +310,7 @@ class _NotesPageState extends State<NotesPage> with AsyncPageMixin<NotesPage> {
         _loading = false;
         _loadingMore = false;
         _displaySnapshot = null;
+        if (refresh) _didInitialLoad = true;
       });
     } catch (e, st) {
       MemErrorReporter.report(

@@ -215,7 +215,15 @@ class _MemShellState extends State<MemShell> {
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
-    if (!_widgetDataSynced) {
+    // Startup widget sync (§4.1 "syncHomePromptWidget re-runs at shell
+    // startup") — gated on hydration, not on the first build. `main.dart`
+    // starts `load()` *after* `runApp`, so on the warm-up frame
+    // `promptTemplates`/`pinnedTemplateIds` are still their empty initialisers.
+    // Syncing then would publish four blank pins, wiping the home-screen
+    // widget's tiles and their `memai://prompt?templateId=…` deep links until
+    // the user next edited or re-pinned a job. Hydration is latched, so this
+    // still runs exactly once — on the first build that has the real pins.
+    if (app.isHydrated && !_widgetDataSynced) {
       _widgetDataSynced = true;
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         if (!mounted) return;
