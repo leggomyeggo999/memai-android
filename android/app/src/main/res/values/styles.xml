@@ -5,6 +5,19 @@
         <!-- Show a splash screen on the activity. Automatically removed when
              the Flutter engine draws its first frame -->
         <item name="android:windowBackground">@drawable/launch_background</item>
+        <!-- Android 12+ draws its own SplashScreen before this window. It only reads the window
+             background when that is a plain colour — ours is a layer-list — so it falls back to
+             colorBackground. Pinning it here keeps the system splash, this window, and Flutter's
+             first frame on one colour. -->
+        <item name="android:colorBackground">@color/launch_bg</item>
+        <!-- Paint the system bars in the splash colour so the cold start reads as one surface
+             instead of a light page under a black status bar (API 24-34; ignored once
+             edge-to-edge is enforced, where the transparent bars show the window background). -->
+        <item name="android:statusBarColor">@color/launch_bg</item>
+        <item name="android:navigationBarColor">@color/launch_bg</item>
+        <!-- Light splash => dark system-bar icons, or they are invisible on #FBFBFC. -->
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
     </style>
     <!-- Theme applied to the Android Window as soon as the process has started.
          This theme determines the color of the Android Window while your
@@ -13,6 +26,13 @@
 
          This Theme is only used starting with V2 of Flutter's Android embedding. -->
     <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
-        <item name="android:windowBackground">?android:colorBackground</item>
+        <!-- @color/launch_bg, not ?android:colorBackground: the platform attribute is pure white
+             (#FFFFFF), which is a visible step away from the light canvas (#FBFBFC) in the handoff
+             between the splash window and Flutter's first frame. -->
+        <item name="android:windowBackground">@color/launch_bg</item>
+        <item name="android:statusBarColor">@color/launch_bg</item>
+        <item name="android:navigationBarColor">@color/launch_bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
     </style>
 </resources>

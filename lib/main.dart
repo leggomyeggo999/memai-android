@@ -38,9 +38,14 @@ class MemDroidApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Depends on AppScope so a themeMode change repaints the app. `home` stays
+    // const, so the shell subtree is not rebuilt by this dependency.
+    final app = AppScope.of(context);
     return MaterialApp(
       title: 'MemDroid',
-      theme: buildMemAppTheme(),
+      theme: memLightTheme,
+      darkTheme: memDarkTheme,
+      themeMode: app.themeMode,
       home: const MemShell(),
     );
   }
