@@ -7,8 +7,27 @@ import '../../app_scope.dart';
 import '../../app_state.dart';
 import '../../core/prompts/home_prompt_widget_sync.dart';
 import '../../core/prompts/prompt_template.dart';
+import '../../theme/mem_metrics.dart';
+import '../../ui/app_list_section.dart';
+import '../../ui/async_page_mixin.dart';
+import '../../ui/confirm_destructive_dialog.dart';
+import '../../ui/editor_sheet.dart';
+import '../../ui/empty_state.dart';
+import '../../ui/feedback.dart';
+import '../../ui/hairline.dart';
+import '../../ui/search_pill.dart';
+import '../../ui/section_header.dart';
+import '../../ui/status_tile.dart';
 
-/// Create, reorder pins, pin to home widget, edit, and delete reusable chat jobs.
+/// Once the list is longer than this, a client-side filter pill appears.
+const int _kFilterThreshold = 8;
+
+/// Create, reorder pins, pin to the home widget, edit, and delete reusable
+/// chat jobs (§4.8).
+///
+/// **`pinnedTemplateIds` is the order source of truth** — the pinned list is
+/// derived from it via `promptById`, so stale ids are tolerated silently and a
+/// reorder persists the *full* id list.
 class PromptJobsPage extends StatefulWidget {
   const PromptJobsPage({super.key});
 
@@ -16,8 +35,19 @@ class PromptJobsPage extends StatefulWidget {
   State<PromptJobsPage> createState() => _PromptJobsPageState();
 }
 
-class _PromptJobsPageState extends State<PromptJobsPage> {
-  bool _pinSupported = false;
+class _PromptJobsPageState extends State<PromptJobsPage>
+    with AsyncPageMixin<PromptJobsPage> {
+  /// `null` until the post-frame probe settles — the status tile says so
+  /// instead of showing a button that may or may not be real.
+  bool? _pinSupported;
+
+  /// The `syncHomePromptWidget` → `requestPinPromptWidget` round-trip.
+  bool _pinning = false;
+
+  final TextEditingController _filterCtrl = TextEditingController();
+  final FocusNode _filterFocus = FocusNode();
+  bool _filterActive = false;
+  String _query = '';
 
   @override
   void initState() {
@@ -28,23 +58,182 @@ class _PromptJobsPageState extends State<PromptJobsPage> {
     });
   }
 
+  @override
+  void dispose() {
+    _filterCtrl.dispose();
+    _filterFocus.dispose();
+    super.dispose();
+  }
+
+  // --- Editor -------------------------------------------------------------
+
   Future<void> _upsertPrompt({PromptTemplate? existing}) async {
-    await showModalBottomSheet<void>(
+    // The draft is the bridge between the sheet's fields (which own — and
+    // dispose — the controllers) and the page-level `isValid` gate / payload.
+    final _PromptDraft draft = _PromptDraft(existing);
+
+    // Captured from the PAGE, before anything async, so the confirmation still
+    // lands after the sheet is popped.
+    final ScaffoldMessengerState messenger = messengerOf();
+
+    await showEditorSheet<void>(
       context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (ctx) => _PromptJobEditorSheet(existing: existing),
+      title: existing == null ? 'New prompt job' : 'Edit prompt job',
+      footerNote: const Text('Sent to the model verbatim.'),
+      // Save stays disabled until both fields carry text — the old silent
+      // no-op on empty input is gone.
+      isValid: () => draft.isComplete,
+      fieldsBuilder: (BuildContext sheetContext, EditorSheetState state) =>
+          <Widget>[_PromptJobFields(draft: draft, sheet: state)],
+      onSave: (BuildContext sheetContext) async {
+        final String title = draft.title.trim();
+        final String body = draft.body.trim();
+        final AppState app = AppScope.of(context);
+        // Template ids are a STABLE contract for the home-widget deep link
+        // `memai://prompt?templateId=<id>`: an edit reuses the existing id and
+        // must never regenerate or rename it.
+        final String id = existing?.id ?? const Uuid().v4();
+        final PromptTemplate tpl = PromptTemplate(
+          id: id,
+          title: title,
+          body: body,
+        );
+
+        if (!sheetContext.mounted) return;
+        // Pop the sheet FIRST, then await the write — same ordering as the
+        // collections editor. (`EditorSheetState.close()` is the same pop.)
+        Navigator.of(sheetContext).pop();
+        await app.upsertPromptJob(tpl);
+        if (!mounted) return;
+        memSnack(messenger, existing == null ? 'Job saved.' : 'Changes saved.');
+      },
     );
   }
 
+  // --- Home widget --------------------------------------------------------
+
   Future<void> _pinWidget() async {
     final app = AppScope.of(context);
-    await syncHomePromptWidget(
-      all: app.promptTemplates,
-      pinnedIds: app.pinnedTemplateIds,
-    );
-    await requestPinPromptWidget();
+    setState(() => _pinning = true);
+    try {
+      // The widget data must be written BEFORE the launcher is asked to pin
+      // it, or the pinned widget renders empty slots.
+      await syncHomePromptWidget(
+        all: app.promptTemplates,
+        pinnedIds: app.pinnedTemplateIds,
+      );
+      await requestPinPromptWidget();
+    } finally {
+      setStateIfMounted(() => _pinning = false);
+    }
   }
+
+  Widget _homeWidgetTile() {
+    final bool? supported = _pinSupported;
+    if (supported == null) {
+      return const StatusTile(
+        icon: Icons.widgets_outlined,
+        label: 'Home screen widget',
+        level: StatusLevel.pending,
+        status: 'Checking…',
+        detail: 'Looking for launcher support.',
+        busy: true,
+      );
+    }
+    if (!supported) {
+      // The explanatory row that replaces the greyed ghost button: state is
+      // said in words, not implied by a disabled control.
+      return const StatusTile(
+        icon: Icons.widgets_outlined,
+        label: 'Home screen widget',
+        level: StatusLevel.neutral,
+        status: 'Not offered',
+        detail:
+            'Add it from your launcher’s widget picker — automatic pinning '
+            'needs Android 8+ and a launcher that supports it.',
+      );
+    }
+    return StatusTile(
+      icon: Icons.widgets_outlined,
+      label: 'Home screen widget',
+      level: StatusLevel.ok,
+      status: 'Available',
+      detail:
+          'A tap runs the pinned job in Chat and notifies you when it ends.',
+      actionLabel: 'Add to home',
+      onAction: _pinWidget,
+      busy: _pinning,
+    );
+  }
+
+  // --- Pin / unpin --------------------------------------------------------
+
+  Future<void> _togglePin(AppState app, PromptTemplate t) async {
+    // The 5th-pin rejection guard, unchanged: the widget has exactly four
+    // slots, so pin #5 is refused rather than silently dropping pin #1.
+    if (app.pinnedTemplateIds.length >= 4 &&
+        !app.pinnedTemplateIds.contains(t.id)) {
+      showMessage('Unpin another job first (max 4).');
+      return;
+    }
+    final next = List<String>.from(app.pinnedTemplateIds);
+    if (next.contains(t.id)) {
+      next.remove(t.id);
+    } else {
+      next.add(t.id);
+    }
+    if (!mounted) return;
+    await AppScope.of(context).setPinnedTemplateIds(next);
+  }
+
+  void _unpin(AppState app, PromptTemplate t) {
+    unawaited(
+      AppScope.of(context).setPinnedTemplateIds(
+        app.pinnedTemplateIds.where((id) => id != t.id).toList(),
+      ),
+    );
+  }
+
+  // --- Delete -------------------------------------------------------------
+
+  Future<void> _deleteJob(PromptTemplate t) async {
+    final ScaffoldMessengerState messenger = messengerOf();
+    final bool ok = await confirmDestructive(
+      context,
+      title: 'Delete job?',
+      consequence:
+          '“${t.title}” will be removed. Any home-screen widget slot using it '
+          'goes empty.',
+      actionLabel: 'Delete',
+    );
+    if (!ok || !mounted) return;
+    await AppScope.of(context).removePromptJob(t.id);
+    if (!mounted) return;
+    memSnack(messenger, 'Job deleted.');
+  }
+
+  // --- Filter -------------------------------------------------------------
+
+  void _enterFilter() {
+    setState(() => _filterActive = true);
+    _filterFocus.requestFocus();
+  }
+
+  void _clearFilterText() {
+    _filterCtrl.clear();
+    setState(() => _query = '');
+  }
+
+  void _exitFilter() {
+    _filterCtrl.clear();
+    _filterFocus.unfocus();
+    setState(() {
+      _query = '';
+      _filterActive = false;
+    });
+  }
+
+  // --- Build --------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -52,224 +241,329 @@ class _PromptJobsPageState extends State<PromptJobsPage> {
     final pinned = [
       for (final id in app.pinnedTemplateIds) app.promptById(id),
     ].whereType<PromptTemplate>().toList();
+
+    final List<PromptTemplate> all = app.promptTemplates;
+    final bool showFilter = all.length > _kFilterThreshold;
+    final String query = showFilter ? _query.trim().toLowerCase() : '';
+    final List<PromptTemplate> visible = query.isEmpty
+        ? all
+        : all
+              .where(
+                (t) =>
+                    t.title.toLowerCase().contains(query) ||
+                    t.body.toLowerCase().contains(query),
+              )
+              .toList();
+
     return Scaffold(
-          appBar: AppBar(
-            title: const Text('Prompt jobs'),
+      appBar: AppBar(title: const Text('Prompt jobs')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _upsertPrompt(),
+        icon: const Icon(Icons.add),
+        label: const Text('New job'),
+      ),
+      body: ListView(
+        // The FAB must not occlude the last row's controls.
+        padding: const EdgeInsets.only(
+          top: MemSpace.x4,
+          bottom: MemInsets.listBottomForFab,
+        ),
+        children: <Widget>[
+          AppListSection(
+            header: const SectionHeader(
+              label: 'Home widget',
+              padding: EdgeInsets.zero,
+            ),
+            children: <Widget>[_homeWidgetTile()],
           ),
-          floatingActionButton: FloatingActionButton(
-            onPressed: () => _upsertPrompt(),
-            child: const Icon(Icons.add),
-          ),
-          body: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
-            children: [
-              Text(
-                'Home screen',
-                style: Theme.of(context).textTheme.titleSmall,
+          const SizedBox(height: MemSpace.sectionGap),
+          if (all.isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: MemSpace.x6),
+              child: EmptyState(
+                icon: Icons.bolt_outlined,
+                headline: 'Create your first prompt job',
+                body: 'Run it from a home-screen widget with one tap.',
+                ctaLabel: 'New job',
+                onCta: () => _upsertPrompt(),
+                firstRun: true,
               ),
-              const SizedBox(height: 4),
-              Text(
-                'Pin up to four jobs on the Prompt jobs widget. Tapping opens MemDroid '
-                'and runs them in Chat; you\'ll get a notification when finished.',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+            )
+          else ...<Widget>[
+            AppListSection(
+              header: SectionHeader(
+                label: 'Pinned · ${pinned.length}/4',
+                padding: EdgeInsets.zero,
+              ),
+              children: <Widget>[
+                if (pinned.isEmpty)
+                  const AppRow(
+                    leading: Icon(Icons.push_pin_outlined),
+                    title: Text('Nothing pinned'),
+                    subtitle: Text(
+                      'Pin up to four jobs to fill the home-screen widget.',
                     ),
+                    subtitleMaxLines: 1,
+                    enabled: false,
+                  )
+                else
+                  _pinnedList(app, pinned),
+              ],
+            ),
+            const SizedBox(height: MemSpace.sectionGap),
+            SectionHeader(
+              label: 'All jobs · ${all.length}',
+              padding: const EdgeInsets.fromLTRB(
+                MemInsets.pageH,
+                0,
+                MemInsets.pageH,
+                MemSpace.headerGap,
               ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  FilledButton.tonal(
-                    onPressed: _pinSupported ? _pinWidget : null,
-                    child: const Text('Add widget to home'),
-                  ),
-                  const SizedBox(width: 12),
-                  if (!_pinSupported)
-                    Expanded(
-                      child: Text(
-                        'Pin widgets require Android 8+ with a launcher that supports them.',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color:
-                                  Theme.of(context).colorScheme.onSurfaceVariant,
-                            ),
-                      ),
+            ),
+            if (showFilter) ...<Widget>[
+              Padding(
+                padding: MemSpace.pageHorizontal,
+                child: SearchPill(
+                  hint: 'Filter jobs',
+                  active: _filterActive,
+                  controller: _filterCtrl,
+                  focusNode: _filterFocus,
+                  onTap: _enterFilter,
+                  onChanged: (String v) => setState(() => _query = v),
+                  onClear: _clearFilterText,
+                  onCancel: _exitFilter,
+                ),
+              ),
+              const SizedBox(height: MemSpace.headerGap),
+            ],
+            if (visible.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: MemSpace.x4),
+                child: EmptyState(
+                  icon: Icons.search_off,
+                  headline: 'No jobs match',
+                  body: 'Try a different word, or clear the filter.',
+                  ctaLabel: 'Clear filter',
+                  onCta: _exitFilter,
+                ),
+              )
+            else
+              AppListSection(
+                children: <Widget>[
+                  for (final t in visible)
+                    _allJobRow(
+                      app,
+                      t,
+                      pinned: app.pinnedTemplateIds.contains(t.id),
                     ),
                 ],
               ),
-              const SizedBox(height: 24),
-              Text(
-                'Pinned for widget (${pinned.length}/4)',
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              const SizedBox(height: 8),
-              if (pinned.isEmpty)
-                Text(
-                  'Open a template’s pin menu below, or reorder here once pinned.',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                )
-              else
-                ReorderableListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: pinned.length,
-                  onReorder: (oldI, newI) {
-                    if (newI > oldI) newI -= 1;
-                    final next = List<PromptTemplate>.from(pinned);
-                    final moved = next.removeAt(oldI);
-                    next.insert(newI, moved);
-                    unawaited(
-                      AppScope.of(context).setPinnedTemplateIds(
-                        next.map((e) => e.id).toList(),
-                      ),
-                    );
-                  },
-                  itemBuilder: (ctx, i) {
-                    final t = pinned[i];
-                    return ListTile(
-                      key: ValueKey(t.id),
-                      leading: Icon(
-                        Icons.drag_handle,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                      title: Text(t.title),
-                      subtitle:
-                          Text(t.body, maxLines: 2, overflow: TextOverflow.ellipsis),
-                      trailing: IconButton(
-                        tooltip: 'Unpin',
-                        icon: const Icon(Icons.push_pin_outlined),
-                        onPressed: () {
-                          AppScope.of(context).setPinnedTemplateIds(
-                            app.pinnedTemplateIds
-                                .where((id) => id != t.id)
-                                .toList(),
-                          );
-                        },
-                      ),
-                    );
-                  },
-                ),
-              const SizedBox(height: 24),
-              Text(
-                'All jobs',
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              const SizedBox(height: 8),
-              if (app.promptTemplates.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 24),
-                  child: Center(child: Text('No jobs yet. Tap + to add one.')),
-                )
-              else
-                ...app.promptTemplates.map(
-                  (t) => _jobTile(
-                    context,
-                    app,
-                    t,
-                    pinned: app.pinnedTemplateIds.contains(t.id),
-                  ),
-                ),
-            ],
-          ),
-        );
+          ],
+        ],
+      ),
+    );
   }
 
-  Widget _jobTile(
-    BuildContext context,
+  /// The pinned list, in `pinnedTemplateIds` order.
+  ///
+  /// `buildDefaultDragHandles: false` is the point of `#10`: the only way to
+  /// drag is the handle the user can see, and long-press-anywhere — the
+  /// invisible gesture the decorative handle used to lie about — is gone.
+  Widget _pinnedList(AppState app, List<PromptTemplate> pinned) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    return ReorderableListView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      buildDefaultDragHandles: false,
+      // The stock decorator animates elevation to 6 and paints a shadow;
+      // depth here is a surface step, app-wide (§0.1).
+      proxyDecorator: (Widget child, int index, Animation<double> animation) {
+        return Material(
+          color: scheme.surfaceContainerHigh,
+          elevation: 0,
+          surfaceTintColor: Colors.transparent,
+          shadowColor: Colors.transparent,
+          child: child,
+        );
+      },
+      itemCount: pinned.length,
+      onReorder: (oldI, newI) {
+        if (newI > oldI) newI -= 1;
+        final next = List<PromptTemplate>.from(pinned);
+        final moved = next.removeAt(oldI);
+        next.insert(newI, moved);
+        unawaited(
+          AppScope.of(
+            context,
+          ).setPinnedTemplateIds(next.map((e) => e.id).toList()),
+        );
+      },
+      itemBuilder: (ctx, i) {
+        final t = pinned[i];
+        return _pinnedRow(app, pinned, t, i);
+      },
+    );
+  }
+
+  Widget _pinnedRow(
     AppState app,
-    PromptTemplate t, {
-    required bool pinned,
-  }) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        title: Text(t.title),
-        subtitle: Text(
-          t.body,
-          maxLines: 3,
-          overflow: TextOverflow.ellipsis,
-        ),
-        isThreeLine: true,
-        trailing: PopupMenuButton<String>(
-          onSelected: (v) async {
-            if (v == 'edit') {
-              await _upsertPrompt(existing: t);
-            } else if (v == 'delete') {
-              final ok = await showDialog<bool>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: const Text('Delete job?'),
-                  content: Text('“${t.title}” will be removed.'),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(ctx, false),
-                      child: const Text('Cancel'),
-                    ),
-                    FilledButton(
-                      onPressed: () => Navigator.pop(ctx, true),
-                      child: const Text('Delete'),
-                    ),
-                  ],
-                ),
-              );
-              if (ok == true) {
-                if (!context.mounted) return;
-                await AppScope.of(context).removePromptJob(t.id);
-              }
-            } else if (v == 'pin') {
-              if (app.pinnedTemplateIds.length >= 4 &&
-                  !app.pinnedTemplateIds.contains(t.id)) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Unpin another job first (max 4).'),
-                    ),
-                  );
-                }
-                return;
-              }
-              final next = List<String>.from(app.pinnedTemplateIds);
-              if (next.contains(t.id)) {
-                next.remove(t.id);
-              } else {
-                next.add(t.id);
-              }
-              if (!mounted) return;
-              await AppScope.of(context).setPinnedTemplateIds(next);
-            }
-          },
-          itemBuilder: (ctx) => [
-            const PopupMenuItem(value: 'edit', child: Text('Edit')),
-            PopupMenuItem(
-              value: 'pin',
-              child: Text(pinned ? 'Unpin from widget' : 'Pin to widget'),
+    List<PromptTemplate> pinned,
+    PromptTemplate t,
+    int index,
+  ) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    final bool isLast = index == pinned.length - 1;
+
+    return Column(
+      // The reorder key contract: one ValueKey per template id.
+      key: ValueKey(t.id),
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        AppRow(
+          minHeight: MemSize.rowSingleLine,
+          leading: SizedBox(
+            width: 20,
+            child: Text(
+              '${index + 1}',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
             ),
-            const PopupMenuItem(value: 'delete', child: Text('Delete')),
-          ],
+          ),
+          title: Text(t.title),
+          subtitle: Text(_promptPreview(t.body)),
+          subtitleMaxLines: 1,
+          onTap: () => _upsertPrompt(existing: t),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              // A REAL drag handle: pointer-down on this icon starts the drag.
+              ReorderableDragStartListener(
+                index: index,
+                child: Semantics(
+                  label: 'Reorder ${t.title}',
+                  child: SizedBox(
+                    width: MemSize.touchTarget,
+                    height: MemSize.touchTarget,
+                    child: Icon(
+                      Icons.drag_handle,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Unpin',
+                icon: Icon(Icons.push_pin, color: scheme.primary),
+                onPressed: () => _unpin(app, t),
+              ),
+            ],
+          ),
         ),
+        if (!isLast) const Hairline(indent: MemSpace.dividerIndent),
+      ],
+    );
+  }
+
+  Widget _allJobRow(AppState app, PromptTemplate t, {required bool pinned}) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+
+    return AppRow(
+      // Row tap edits — the inert row is fixed (`#6`, `#10`).
+      onTap: () => _upsertPrompt(existing: t),
+      title: Row(
+        children: <Widget>[
+          Flexible(child: Text(t.title)),
+          if (pinned) ...<Widget>[
+            const SizedBox(width: MemSpace.x2),
+            // The visible pinned indicator (`#11`).
+            Semantics(
+              label: 'Pinned to the home widget',
+              child: Icon(Icons.push_pin, size: 14, color: scheme.primary),
+            ),
+          ],
+        ],
+      ),
+      subtitle: Text(_promptPreview(t.body)),
+      subtitleMaxLines: 1,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          // The primary secondary-action moves OUT of the kebab (`#6`).
+          IconButton(
+            tooltip: pinned ? 'Unpin from widget' : 'Pin to widget',
+            icon: Icon(
+              pinned ? Icons.push_pin : Icons.push_pin_outlined,
+              color: pinned ? scheme.primary : scheme.onSurfaceVariant,
+            ),
+            onPressed: () => _togglePin(app, t),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'More',
+            icon: const Icon(Icons.more_vert),
+            onSelected: (v) async {
+              if (v == 'edit') {
+                await _upsertPrompt(existing: t);
+              } else if (v == 'delete') {
+                await _deleteJob(t);
+              }
+            },
+            itemBuilder: (ctx) => const <PopupMenuEntry<String>>[
+              PopupMenuItem<String>(value: 'edit', child: Text('Edit')),
+              PopupMenuItem<String>(value: 'delete', child: Text('Delete')),
+            ],
+          ),
+        ],
       ),
     );
   }
 }
 
-class _PromptJobEditorSheet extends StatefulWidget {
-  const _PromptJobEditorSheet({this.existing});
+/// A prompt body collapsed to one line for the row preview. Presentation only
+/// — the stored body is never rewritten.
+String _promptPreview(String body) =>
+    body.replaceAll(RegExp(r'\s+'), ' ').trim();
 
-  final PromptTemplate? existing;
+/// The live values of the editor sheet's two fields.
+///
+/// The controllers themselves belong to [_PromptJobFields] — a `State` that
+/// lives and dies with the sheet — so nothing can read them after teardown.
+/// The page-level `isValid` gate and the save payload read this instead.
+class _PromptDraft {
+  _PromptDraft(PromptTemplate? existing)
+    : title = existing?.title ?? '',
+      body = existing?.body ?? '';
 
-  @override
-  State<_PromptJobEditorSheet> createState() => _PromptJobEditorSheetState();
+  String title;
+  String body;
+
+  bool get isComplete => title.trim().isNotEmpty && body.trim().isNotEmpty;
 }
 
-class _PromptJobEditorSheetState extends State<_PromptJobEditorSheet> {
+/// The editor sheet's fields. Seeds its controllers from the draft and disposes
+/// them in its own `dispose`, per the editor-sheet contract.
+class _PromptJobFields extends StatefulWidget {
+  const _PromptJobFields({required this.draft, required this.sheet});
+
+  final _PromptDraft draft;
+  final EditorSheetState sheet;
+
+  @override
+  State<_PromptJobFields> createState() => _PromptJobFieldsState();
+}
+
+class _PromptJobFieldsState extends State<_PromptJobFields> {
   late final TextEditingController _titleCtrl;
   late final TextEditingController _bodyCtrl;
 
   @override
   void initState() {
     super.initState();
-    _titleCtrl = TextEditingController(text: widget.existing?.title ?? '');
-    _bodyCtrl = TextEditingController(text: widget.existing?.body ?? '');
+    _titleCtrl = TextEditingController(text: widget.draft.title);
+    _bodyCtrl = TextEditingController(text: widget.draft.body);
   }
 
   @override
@@ -279,72 +573,43 @@ class _PromptJobEditorSheetState extends State<_PromptJobEditorSheet> {
     super.dispose();
   }
 
-  Future<void> _save(BuildContext sheetContext) async {
-    final title = _titleCtrl.text.trim();
-    final body = _bodyCtrl.text.trim();
-    if (title.isEmpty || body.isEmpty) return;
-
-    final app = AppScope.of(context);
-    final id = widget.existing?.id ?? const Uuid().v4();
-    final tpl = PromptTemplate(id: id, title: title, body: body);
-    final messenger = ScaffoldMessenger.of(context);
-
-    if (!sheetContext.mounted) return;
-    Navigator.of(sheetContext).pop();
-    await app.upsertPromptJob(tpl);
-    if (!mounted) return;
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(widget.existing == null ? 'Job saved.' : 'Changes saved.'),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final existing = widget.existing;
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 20,
-        right: 20,
-        top: 8,
-        bottom: MediaQuery.viewInsetsOf(context).bottom + 20,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            existing == null ? 'New prompt job' : 'Edit prompt job',
-            style: Theme.of(context).textTheme.titleMedium,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        TextField(
+          controller: _titleCtrl,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(
+            labelText: 'Title',
+            hintText: 'e.g. Categorize untagged notes',
           ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _titleCtrl,
-            decoration: const InputDecoration(
-              labelText: 'Title',
-              hintText: 'e.g. Categorize untagged notes',
-              border: OutlineInputBorder(),
-            ),
+          onChanged: (v) {
+            widget.draft.title = v;
+            // Re-reads the Save gate.
+            widget.sheet.refresh();
+          },
+        ),
+        const SizedBox(height: MemSpace.x3),
+        TextField(
+          controller: _bodyCtrl,
+          minLines: 6,
+          maxLines: 12,
+          scrollPadding: const EdgeInsets.only(
+            bottom: MemInsets.editorScrollPad,
           ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _bodyCtrl,
-            minLines: 6,
-            maxLines: 12,
-            decoration: const InputDecoration(
-              labelText: 'Prompt sent to Chat (tools enabled)',
-              alignLabelWithHint: true,
-              border: OutlineInputBorder(),
-            ),
+          decoration: const InputDecoration(
+            labelText: 'Prompt sent to Chat (tools enabled)',
+            alignLabelWithHint: true,
           ),
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: () => _save(context),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+          onChanged: (v) {
+            widget.draft.body = v;
+            widget.sheet.refresh();
+          },
+        ),
+      ],
     );
   }
 }

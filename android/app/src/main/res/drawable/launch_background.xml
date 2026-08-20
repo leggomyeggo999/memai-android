@@ -1,14 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Modify this file to customize your launch splash screen -->
+<!-- Cold-start window background.
+
+     @color/launch_bg is split light (values/colors.xml, #FBFBFC) vs night
+     (values-night/colors.xml, #050505) so the splash already matches the Flutter canvas and
+     System/Light users never see a dark->light flash on launch.
+
+     Keep this file byte-identical to drawable-v21/launch_background.xml: minSdk is 24, so the
+     -v21 copy is the one that actually resolves, and a drift between the two is invisible until
+     someone lowers minSdk. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/launch_bg" />
 
-    <item android:gravity="center">
-        <inset
-            android:insetLeft="110dp"
-            android:insetTop="250dp"
-            android:insetRight="110dp"
-            android:insetBottom="250dp"
-            android:drawable="@drawable/ic_launcher_brain" />
-    </item>
+    <!-- Explicitly sized and centred. The previous fixed 110/250dp insets sized the glyph from
+         whatever the screen left over, which stretched it into a tall rectangle on tall phones
+         and squashed it in landscape; ic_launcher_brain's geometry is authored on a 140dp square. -->
+    <item
+        android:gravity="center"
+        android:width="140dp"
+        android:height="140dp"
+        android:drawable="@drawable/ic_launcher_brain" />
 </layer-list>

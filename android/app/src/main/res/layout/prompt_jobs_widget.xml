@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Prompt-jobs home-screen widget. Every id here is bound by PromptJobsWidgetProvider.kt
+     (row_slot_0..3 take the launch PendingIntent, title_slot_0..3 take the pinned title) —
+     ids and structure must not change. Only the text colours are themed: header = onSurface,
+     slot titles = onSurfaceVariant (DESIGN_SPEC §2.2). -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/prompt_widget_root"
     android:layout_width="match_parent"
@@ -13,7 +17,7 @@
         android:text="Mem prompt jobs"
         android:textStyle="bold"
         android:textSize="13sp"
-        android:textColor="#FFE8E8E8"
+        android:textColor="@color/mem_widget_on_surface"
         android:paddingBottom="6dp" />
 
     <LinearLayout
@@ -32,7 +36,7 @@
             android:maxLines="2"
             android:ellipsize="end"
             android:textSize="12sp"
-            android:textColor="#FFB0B0B0"
+            android:textColor="@color/mem_widget_on_surface_variant"
             android:text="—" />
     </LinearLayout>
 
@@ -52,7 +56,7 @@
             android:maxLines="2"
             android:ellipsize="end"
             android:textSize="12sp"
-            android:textColor="#FFB0B0B0"
+            android:textColor="@color/mem_widget_on_surface_variant"
             android:text="—" />
     </LinearLayout>
 
@@ -72,7 +76,7 @@
             android:maxLines="2"
             android:ellipsize="end"
             android:textSize="12sp"
-            android:textColor="#FFB0B0B0"
+            android:textColor="@color/mem_widget_on_surface_variant"
             android:text="—" />
     </LinearLayout>
 
@@ -92,7 +96,7 @@
             android:maxLines="2"
             android:ellipsize="end"
             android:textSize="12sp"
-            android:textColor="#FFB0B0B0"
+            android:textColor="@color/mem_widget_on_surface_variant"
             android:text="—" />
     </LinearLayout>
 </LinearLayout>

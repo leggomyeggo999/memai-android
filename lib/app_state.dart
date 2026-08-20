@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'core/llm/chat_model_profile.dart';
@@ -7,13 +6,18 @@ import 'core/prompts/home_prompt_widget_sync.dart';
 import 'core/prompts/prompt_template.dart';
 import 'core/prompts/prompt_template_store.dart';
 import 'core/security/secure_vault.dart';
+import 'core/settings/appearance_store.dart';
 
 /// Loads secrets once at startup and exposes derived booleans to the UI.
 class AppState extends ChangeNotifier {
-  AppState() : _vault = SecureVault(), _promptStore = PromptTemplateStore();
+  AppState()
+    : _vault = SecureVault(),
+      _promptStore = PromptTemplateStore(),
+      _appearance = AppearanceStore();
 
   final SecureVault _vault;
   final PromptTemplateStore _promptStore;
+  final AppearanceStore _appearance;
   late final MemMcpOAuth _mcpOAuth = MemMcpOAuth(vault: _vault);
 
   /// Increment to tell the Notes tab (and similar) to reload from the API.
@@ -40,7 +44,32 @@ class AppState extends ChangeNotifier {
     shellTabRequest.value = index;
   }
 
+  /// When set, the Notes tab applies this collection filter **once**, then
+  /// clears the channel in a `scheduleMicrotask` — the same
+  /// consume-once-and-clear discipline as [shellTabRequest]. Getting this
+  /// wrong causes re-filter loops.
+  final ValueNotifier<String?> notesFilterRequest = ValueNotifier(null);
+
+  void requestNotesFilter(String collectionId) {
+    notesFilterRequest.value = collectionId;
+    goToShellTab(0);
+  }
+
   bool get hasMemRest => memApiKey != null && memApiKey!.isNotEmpty;
+
+  /// One derived signal, three consumers: the gear badge, the Settings setup
+  /// card, and every "Open Settings" CTA. They can never disagree.
+  bool get setupComplete => hasMemRest && chatModels.isNotEmpty;
+
+  /// Appearance preference. Dark is the product default and the launch splash
+  /// is dark, so this never starts light.
+  ThemeMode themeMode = ThemeMode.dark;
+
+  Future<void> setThemeMode(ThemeMode mode) async {
+    await _appearance.saveThemeMode(mode);
+    themeMode = mode;
+    notifyListeners();
+  }
 
   /// True after the first [load] from secure storage has finished.
   bool isHydrated = false;
@@ -54,6 +83,9 @@ class AppState extends ChangeNotifier {
     chatModels = ChatModelProfile.decodeList(raw);
     voiceOpenAiApiKey = await _vault.getVoiceOpenAiApiKey();
     voiceWhisperModel = await _vault.getVoiceWhisperModel() ?? 'whisper-1';
+    // Read before isHydrated flips so the first settled frame already has the
+    // user's chosen brightness — no dark -> light flash after the splash.
+    themeMode = await _appearance.loadThemeMode();
     if (activeModelId == null && chatModels.isNotEmpty) {
       activeModelId = chatModels.first.id;
     }

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Night override for the cold-start window background ONLY.
+         Dark value = memDarkScheme.surface (#050505), which is also scaffoldBackgroundColor, so
+         the splash and the first Flutter frame are the same colour.
+
+         Nothing else from values/colors.xml is overridden here on purpose: the launcher icon and
+         the home-screen widget must not flip with the host configuration. See values/colors.xml. -->
+    <color name="launch_bg">#050505</color>
+</resources>

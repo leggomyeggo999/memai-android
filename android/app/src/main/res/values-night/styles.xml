@@ -5,6 +5,17 @@
         <!-- Show a splash screen on the activity. Automatically removed when
              the Flutter engine draws its first frame -->
         <item name="android:windowBackground">@drawable/launch_background</item>
+        <!-- Android 12+ draws its own SplashScreen before this window and falls back to
+             colorBackground when the window background is a layer-list rather than a plain
+             colour. Pin it so the system splash matches too. -->
+        <item name="android:colorBackground">@color/launch_bg</item>
+        <!-- Same seam fix as values/styles.xml, in the dark direction: the system bars take the
+             splash colour instead of the platform's pure black. -->
+        <item name="android:statusBarColor">@color/launch_bg</item>
+        <item name="android:navigationBarColor">@color/launch_bg</item>
+        <!-- Dark splash => light system-bar icons. -->
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
     <!-- Theme applied to the Android Window as soon as the process has started.
          This theme determines the color of the Android Window while your
@@ -13,6 +24,12 @@
 
          This Theme is only used starting with V2 of Flutter's Android embedding. -->
     <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
-        <item name="android:windowBackground">?android:colorBackground</item>
+        <!-- @color/launch_bg, not ?android:colorBackground: the platform attribute is pure black
+             (#000000), which is a visible step away from the true-black canvas (#050505). -->
+        <item name="android:windowBackground">@color/launch_bg</item>
+        <item name="android:statusBarColor">@color/launch_bg</item>
+        <item name="android:navigationBarColor">@color/launch_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>

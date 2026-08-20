@@ -1,5 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="launch_bg">#0F1216</color>
-</resources>
+    <!-- Off-app brand surfaces. Mirrors the Flutter tokens in lib/theme/
+         (DESIGN_SPEC §2.2 dark / §2.3 light). Keep the two in sync by hand: Android resources
+         cannot read a Dart ColorScheme. -->
 
+    <!-- Cold-start window background. This is the ONLY colour in this file that varies by night
+         mode (see values-night/colors.xml). It must already match the Flutter canvas when the
+         first frame lands, or System/Light users get a dark->light flash.
+         Light value = memLightScheme.surface (#FBFBFC). -->
+    <color name="launch_bg">#FBFBFC</color>
+
+    <!-- Night-INVARIANT brand ink. Deliberately not overridden in values-night/: the launcher
+         icon and the home-screen widget are inflated by the *launcher* process against its own
+         configuration, so they must read identically whatever uiMode says. All values are taken
+         from the dark scheme, which is the product's default identity. -->
+    <color name="mem_brand_canvas">#050505</color>              <!-- memDarkScheme.surface -->
+    <color name="mem_brand_primary">#5EA2FF</color>             <!-- memDarkScheme.primary -->
+    <color name="mem_widget_surface">#0E0E10</color>            <!-- surfaceContainerLow -->
+    <color name="mem_widget_outline">#63636F</color>            <!-- outline (boundary hairline) -->
+    <color name="mem_widget_on_surface">#EDEDF0</color>         <!-- onSurface -->
+    <color name="mem_widget_on_surface_variant">#9A9AA5</color> <!-- onSurfaceVariant -->
+</resources>
