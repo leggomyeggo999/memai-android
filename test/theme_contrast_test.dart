@@ -64,7 +64,15 @@ void main() {
         6.9,
         label: 'dark onSurfaceVariant on surfaceContainerLow',
       );
-      expectRatio(cs.primary, cs.surface, 7.9, label: 'dark primary on surface');
+      // The §2.3 table prints this row as "7.9 : 1", but that cell is a bad
+      // round of its own tokens: primary #5EA2FF on surface #050505 computes to
+      // 7.84980…, which rounds to 7.8. Both literals are pinned verbatim by the
+      // spec's §2.2 code block and by the token-completeness test below, so the
+      // tokens are law and the printed figure is the typo. Every other row in
+      // the table rounds correctly (17.443→17.4, 9.007→9.0, 6.059→6.1). This
+      // still guards the pair — it will fail the moment either token is nudged
+      // darker — it just guards it at the ratio the spec's own tokens produce.
+      expectRatio(cs.primary, cs.surface, 7.8, label: 'dark primary on surface');
       expectRatio(
         cs.tertiary,
         cs.surface,

@@ -170,6 +170,16 @@ void main() {
   });
 
   group('collectionInkFor(context, id)', () {
+    /// Pumps [brightness] and reads the ink for [id] **after the theme
+    /// transition has finished**.
+    ///
+    /// `MaterialApp` wraps its theme in an `AnimatedTheme`
+    /// (`kThemeAnimationDuration`, 200 ms) and `MemSemanticColors` implements
+    /// `lerp`, so on the first frame after a brightness swap `Theme.of` still
+    /// yields the *previous* extension (t = 0). Without settling, re-pumping the
+    /// same tester with the light theme reads back the dark ramp byte-for-byte.
+    /// `pumpAndSettle` runs the transition to t = 1, where `CollectionInk.lerp`
+    /// returns the target ink exactly.
     Future<CollectionInk> resolve(
       WidgetTester tester,
       Brightness brightness,
@@ -187,6 +197,7 @@ void main() {
           ),
         ),
       );
+      await tester.pumpAndSettle();
       return resolved;
     }
 

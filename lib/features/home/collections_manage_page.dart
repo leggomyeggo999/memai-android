@@ -219,7 +219,13 @@ class _CollectionsManagePageState extends State<CollectionsManagePage>
     final app = AppScope.of(context);
     final messenger = messengerOf();
     final c = _client();
-    if (c == null) return;
+    if (c == null) {
+      // Reachable only if the key was cleared while this page was open. Say so
+      // instead of swallowing the tap (`#1`); the message is a MemApiException,
+      // so memErrorText renders it and no raw exception text is involved.
+      errSnack(messenger, MemApiException('Missing Mem API key.'));
+      return;
+    }
     try {
       await c.deleteCollection(item.id);
       await _load();

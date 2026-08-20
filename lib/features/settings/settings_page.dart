@@ -1,501 +1,934 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_appauth/flutter_appauth.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../app_scope.dart';
+import '../../app_state.dart';
 import '../../core/llm/chat_model_profile.dart';
 import '../../core/llm/curated_chat_models.dart';
-import '../../core/mcp/mem_oauth.dart' show MemMcpOAuth;
+import '../../theme/mem_metrics.dart';
+import '../../theme/mem_semantic_colors.dart';
+import '../../ui/app_list_section.dart';
+import '../../ui/async_page_mixin.dart';
+import '../../ui/confirm_destructive_dialog.dart';
+import '../../ui/editor_sheet.dart';
+import '../../ui/empty_state.dart';
+import '../../ui/feedback.dart';
+import '../../ui/provider_badge.dart';
+import '../../ui/section_header.dart';
+import '../../ui/status_tile.dart';
 import 'prompt_jobs_page.dart';
 
+/// The anchors every "Open Settings" CTA in the app deep-links to.
+///
+/// A CTA that dumps the user at the top of a long scroll is not a recovery, so
+/// `errSnack` and the chat model switcher name the section that matches the
+/// failure and [SettingsPage.focusSection] scrolls there on the first frame.
+enum SettingsSection { account, models, voice, automation, appearance, security }
+
+/// Settings, rebuilt from a README into an instrument panel (§4.7).
+///
+/// State is **stated, not implied**: every credential and connection reports
+/// through a [StatusTile] with a dot and words, instead of being inferred from
+/// which button happens to be greyed out.
+///
+/// The constructor stays `const`-compatible with no required arguments, because
+/// `settingsIconActions` / `SettingsGearButton` push `const SettingsPage()` and
+/// that contract must hold.
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key});
+  const SettingsPage({super.key, this.focusSection});
+
+  /// Scrolled into view on the first frame. Null lands at the top.
+  final SettingsSection? focusSection;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsPageState extends State<SettingsPage> {
-  final _apiKeyCtrl = TextEditingController();
-  final _voiceOpenAiKeyCtrl = TextEditingController();
-  static const List<(String id, String label)> _voiceModels = [
-    ('whisper-1', 'Whisper-1'),
+class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<SettingsPage> {
+  /// Friendly labels over the **exact** transcription model values the voice
+  /// pipeline sends. Only the labels are presentation; the ids are contract.
+  static const List<(String id, String label)> _voiceModels = <(String, String)>[
+    ('whisper-1', 'Whisper'),
     ('gpt-4o-mini-transcribe', 'GPT-4o mini transcribe'),
   ];
-  bool _maskKey = true;
-  bool _maskVoiceKey = true;
+
+  static const List<String> _providers = <String>['openai', 'anthropic', 'gemini'];
+
+  /// One anchor per section, so [SettingsPage.focusSection] and the setup
+  /// card's tiles can both scroll to the same places.
+  final Map<SettingsSection, GlobalKey> _anchors = <SettingsSection, GlobalKey>{
+    for (final SettingsSection s in SettingsSection.values) s: GlobalKey(),
+  };
+
+  /// Sheet-owned secret fields. They live on the page's `State` — not inside
+  /// the sheet closure — so they are disposed exactly once, at page teardown,
+  /// and never while a route is still finishing its teardown rebuild.
+  final TextEditingController _memKeySheetCtrl = TextEditingController();
+  final TextEditingController _voiceKeySheetCtrl = TextEditingController();
+
+  /// The **masked** tails, captured post-frame. The full secret is never held
+  /// in widget state and never rendered.
+  String? _memKeyMask;
+  String? _voiceKeyMask;
+
+  /// True while the OAuth browser round-trip is in flight — the pending tile
+  /// that closes the dead-air gap.
+  bool _mcpBusy = false;
+
+  /// Reveal state for whichever secret sheet is open (only one ever is).
+  bool _reveal = false;
+  Timer? _revealTimer;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final app = AppScope.of(context);
-      final k = app.memApiKey;
-      if (k != null && mounted) _apiKeyCtrl.text = k;
-      final voiceKey = app.voiceOpenAiApiKey;
-      if (voiceKey != null && mounted) _voiceOpenAiKeyCtrl.text = voiceKey;
+    // Key reads are deferred to post-frame: `AppScope.of` registers an
+    // inherited dependency and must not run during initState. What is read
+    // here is the *presence* and the last three characters for masking —
+    // never the full value, and never into a visible field.
+    postFrame(() {
+      _syncMaskedKeys(AppScope.of(context));
+      _scrollTo(widget.focusSection);
     });
   }
 
   @override
   void dispose() {
-    _apiKeyCtrl.dispose();
-    _voiceOpenAiKeyCtrl.dispose();
+    _revealTimer?.cancel();
+    _memKeySheetCtrl.dispose();
+    _voiceKeySheetCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _saveApiKey() async {
-    final app = AppScope.of(context);
-    await app.setMemApiKey(_apiKeyCtrl.text.trim().isEmpty ? null : _apiKeyCtrl.text.trim());
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Mem API key saved securely on-device.')),
-      );
-    }
+  // ---------------------------------------------------------------- helpers
+
+  /// Re-reads presence + mask after a key mutation this page performed.
+  void _syncMaskedKeys(AppState app) {
+    final String? mem = app.memApiKey;
+    final String? voice = app.voiceOpenAiApiKey;
+    setStateIfMounted(() {
+      _memKeyMask = (mem == null || mem.isEmpty) ? null : memMaskedSecret(mem);
+      _voiceKeyMask = (voice == null || voice.isEmpty) ? null : memMaskedSecret(voice);
+    });
   }
 
-  Future<void> _connectMcp() async {
-    final app = AppScope.of(context);
+  void _scrollTo(SettingsSection? section) {
+    if (section == null) return;
+    final BuildContext? anchor = _anchors[section]?.currentContext;
+    if (anchor == null) return;
+    unawaited(
+      Scrollable.ensureVisible(
+        anchor,
+        alignment: 0,
+        duration: MemMotion.standard,
+        curve: MemMotion.emphasized,
+      ),
+    );
+  }
+
+  void _resetReveal() {
+    _revealTimer?.cancel();
+    _revealTimer = null;
+    _reveal = false;
+  }
+
+  /// A revealed secret re-obscures itself after 10 s. Shoulder-surf safety is
+  /// not something the user should have to remember to switch back on.
+  void _toggleReveal(EditorSheetState state) {
+    _revealTimer?.cancel();
+    _reveal = !_reveal;
+    if (_reveal) {
+      _revealTimer = Timer(MemMotion.revealTimeout, () {
+        _reveal = false;
+        state.refresh();
+      });
+    }
+    state.refresh();
+  }
+
+  /// The profile the app would use right now: the active one, or the first as
+  /// the same fallback Chat applies on an id miss.
+  ChatModelProfile? _activeProfile(AppState app) {
+    if (app.chatModels.isEmpty) return null;
+    for (final ChatModelProfile m in app.chatModels) {
+      if (m.id == app.activeModelId) return m;
+    }
+    return app.chatModels.first;
+  }
+
+  // ------------------------------------------------------------- MCP OAuth
+
+  Future<void> _connectMcp(AppState app) async {
+    final ScaffoldMessengerState messenger = messengerOf();
+    setStateIfMounted(() => _mcpBusy = true);
     try {
       await app.connectMcp();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('MCP OAuth complete. Access token stored.')),
-        );
-      }
+      if (!mounted) return;
+      memSnack(messenger, 'Mem MCP connected.');
     } on FlutterAppAuthUserCancelledException {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Sign-in cancelled.')),
-        );
-      }
+      if (!mounted) return;
+      memSnack(messenger, 'Sign-in cancelled.');
     } on PlatformException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('OAuth error: ${e.message}')),
-        );
-      }
+      if (!mounted) return;
+      memSnack(messenger, 'OAuth error: ${e.message}');
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(e.toString())));
-      }
+      // The OAuth error taxonomy is a hard contract (CONSTRAINTS.md): the
+      // generic branch reports `toString`. It is the one place in the app a
+      // raw exception string is deliberately surfaced.
+      if (!mounted) return;
+      memSnack(messenger, e.toString());
+    } finally {
+      setStateIfMounted(() => _mcpBusy = false);
     }
   }
 
-  Future<void> _saveVoiceSettings() async {
-    final app = AppScope.of(context);
-    await app.setVoiceOpenAiApiKey(
-      _voiceOpenAiKeyCtrl.text.trim().isEmpty ? null : _voiceOpenAiKeyCtrl.text.trim(),
+  Future<void> _disconnectMcp(AppState app) async {
+    final bool ok = await confirmDestructive(
+      context,
+      title: 'Disconnect Mem MCP?',
+      consequence:
+          'The stored access token is deleted. Chat tools fall back to your '
+          'Mem API key.',
+      actionLabel: 'Disconnect',
     );
+    if (!ok || !mounted) return;
+    final ScaffoldMessengerState messenger = messengerOf();
+    await app.disconnectMcp();
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Voice transcription settings saved.')),
+    memSnack(messenger, 'Mem MCP disconnected.');
+  }
+
+  // --------------------------------------------------------- secret editors
+
+  /// The app's worst footgun, defused.
+  ///
+  /// The field starts **blank** — a stored secret is never prefilled as
+  /// revealable plaintext — and Save is gated on the field being dirty, so an
+  /// untouched sheet can never wipe a key. The underlying trim + empty→null
+  /// delete semantics are unchanged; they are simply no longer reachable by
+  /// accident, only through the explicit error-styled Remove action.
+  Future<void> _showSecretSheet({
+    required String title,
+    required TextEditingController controller,
+    required String fieldLabel,
+    required String helperText,
+    required bool hasStoredKey,
+    required Future<void> Function(String? trimmedOrNull) write,
+    required String savedMessage,
+    required String removedMessage,
+    required String removeTitle,
+    required String removeConsequence,
+  }) async {
+    // Captured from the page, before anything async.
+    final ScaffoldMessengerState messenger = messengerOf();
+    final AppState app = AppScope.of(context);
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+
+    controller.clear();
+    _resetReveal();
+    EditorSheetState? sheet;
+
+    await showEditorSheet<void>(
+      context: context,
+      title: title,
+      saveLabel: 'Save key',
+      footerNote: const Text('Stored in your device keystore.'),
+      isValid: () => controller.text.trim().isNotEmpty,
+      fieldsBuilder: (BuildContext sheetContext, EditorSheetState state) {
+        sheet = state;
+        return <Widget>[
+          TextField(
+            controller: controller,
+            obscureText: !_reveal,
+            autocorrect: false,
+            enableSuggestions: false,
+            onChanged: (String _) => state.refresh(),
+            decoration: InputDecoration(
+              labelText: fieldLabel,
+              hintText: 'Enter a new key to replace',
+              helperText: helperText,
+              suffixIcon: IconButton(
+                tooltip: _reveal ? 'Hide key' : 'Show key',
+                icon: Icon(
+                  _reveal
+                      ? Icons.visibility_off_outlined
+                      : Icons.visibility_outlined,
+                ),
+                onPressed: () => _toggleReveal(state),
+              ),
+            ),
+          ),
+          if (hasStoredKey) ...<Widget>[
+            const SizedBox(height: MemSpace.x3),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: state.saving
+                    ? null
+                    : () async {
+                        final bool ok = await confirmDestructive(
+                          sheetContext,
+                          title: removeTitle,
+                          consequence: removeConsequence,
+                          actionLabel: 'Remove key',
+                        );
+                        if (!ok || !sheetContext.mounted) return;
+                        // The trim + empty -> null delete path, reached the
+                        // only way it can now be reached: on purpose.
+                        await write(null);
+                        if (!sheetContext.mounted) return;
+                        state.close();
+                        _syncMaskedKeys(app);
+                        memSnack(messenger, removedMessage);
+                      },
+                style: TextButton.styleFrom(
+                  foregroundColor: scheme.error,
+                  minimumSize: const Size(64, MemSize.touchTarget),
+                ),
+                icon: const Icon(Icons.delete_outline),
+                label: const Text('Remove key'),
+              ),
+            ),
+          ],
+        ];
+      },
+      onSave: (BuildContext sheetContext) async {
+        final String value = controller.text.trim();
+        // Unreachable — isValid gates it — but the empty->null contract is
+        // spelled out here rather than assumed.
+        if (value.isEmpty) return;
+        await write(value);
+        if (!sheetContext.mounted) return;
+        sheet?.close();
+        _syncMaskedKeys(app);
+        memSnack(messenger, savedMessage);
+      },
+    );
+
+    _resetReveal();
+  }
+
+  Future<void> _showMemKeySheet(AppState app) {
+    return _showSecretSheet(
+      title: 'Mem API key',
+      controller: _memKeySheetCtrl,
+      fieldLabel: 'Mem API key',
+      helperText: 'From Mem Settings → API.',
+      hasStoredKey: app.hasMemRest,
+      write: app.setMemApiKey,
+      savedMessage: 'Mem API key saved.',
+      removedMessage: 'Mem API key removed.',
+      removeTitle: 'Remove key?',
+      removeConsequence:
+          'Notes, capture, and Mem chat tools stop working until you add a '
+          'key again.',
     );
   }
 
+  Future<void> _showVoiceKeySheet(AppState app) {
+    return _showSecretSheet(
+      title: 'OpenAI key for voice',
+      controller: _voiceKeySheetCtrl,
+      fieldLabel: 'OpenAI API key',
+      helperText: 'Uses your chat model key when empty.',
+      hasStoredKey: _voiceKeyMask != null,
+      write: app.setVoiceOpenAiApiKey,
+      savedMessage: 'Voice key saved.',
+      removedMessage: 'Voice key removed.',
+      removeTitle: 'Remove key?',
+      removeConsequence:
+          'Voice transcription falls back to your OpenAI chat model key.',
+    );
+  }
+
+  // ----------------------------------------------------------- model editor
+
   Future<void> _showChatModelEditor({ChatModelProfile? existing}) async {
-    final isEdit = existing != null;
-    final keyCtrl = TextEditingController();
-    var provider = existing?.provider ?? 'openai';
-    var catalog = curatedModelsForProvider(provider);
+    final bool isEdit = existing != null;
+
+    // The save-order contract: messenger + AppScope come from the **page**
+    // context, before anything async, and are what the sheet writes through
+    // after it has popped itself.
+    final ScaffoldMessengerState messenger = messengerOf();
+    final AppState pageApp = AppScope.of(context);
+
+    // Intentionally NOT disposed. The route can still be finishing teardown
+    // animations after this future completes and briefly rebuild the
+    // TextField; disposing here crashes on that rebuild.
+    final TextEditingController keyCtrl = TextEditingController();
+
+    String provider = existing?.provider ?? 'openai';
+    List<CuratedChatModel> catalog = curatedModelsForProvider(provider);
     CuratedChatModel? selected = existing == null
         ? (catalog.isEmpty ? null : catalog.first)
         : (curatedModelByApiId(provider, existing.model) ??
               (catalog.isEmpty ? null : catalog.first));
 
-    await showDialog<void>(
+    // Catalog drift: the stored api model id is no longer in the curated list,
+    // so a replacement is pre-selected and the user is told why.
+    final bool drifted =
+        existing != null &&
+        curatedModelByApiId(existing.provider, existing.model) == null;
+
+    _resetReveal();
+    EditorSheetState? sheet;
+
+    await showEditorSheet<void>(
       context: context,
-      builder: (dialogRouteContext) {
-        return StatefulBuilder(
-          builder: (dialogContext, setLocal) {
-            return AlertDialog(
-              title: Text(isEdit ? 'Edit chat model' : 'Add chat model'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(
-                      'Pick provider and model. The display title is chosen automatically.',
-                      style: Theme.of(dialogContext).textTheme.bodySmall
-                          ?.copyWith(
-                            color: Theme.of(dialogContext)
-                                .colorScheme
-                                .onSurfaceVariant,
-                          ),
-                    ),
-                    if (existing != null &&
-                        curatedModelByApiId(existing.provider, existing.model) ==
-                            null) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        'Stored model "${existing.model}" is not in the current catalog. '
-                        'Choose a replacement below.',
-                        style: Theme.of(dialogContext).textTheme.bodySmall
-                            ?.copyWith(color: Theme.of(dialogContext).colorScheme.error),
-                      ),
-                    ],
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      value: provider,
-                      items: const [
-                        DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
-                        DropdownMenuItem(
-                          value: 'anthropic',
-                          child: Text('Anthropic'),
-                        ),
-                        DropdownMenuItem(value: 'gemini', child: Text('Gemini')),
-                      ],
-                      onChanged: (v) {
-                        setLocal(() {
-                          provider = v ?? 'openai';
-                          catalog = curatedModelsForProvider(provider);
-                          selected =
-                              catalog.isEmpty ? null : catalog.first;
-                        });
-                      },
-                      decoration: const InputDecoration(labelText: 'Provider'),
-                    ),
-                    const SizedBox(height: 12),
-                    if (catalog.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 8),
-                        child: Text('No models defined for this provider.'),
-                      )
-                    else
-                      DropdownButtonFormField<CuratedChatModel>(
-                        value: selected,
-                        isExpanded: true,
-                        decoration: const InputDecoration(
-                          labelText: 'Model',
-                        ),
-                        items: catalog
-                            .map(
-                              (m) => DropdownMenuItem(
-                                value: m,
-                                child: Text(
-                                  '${chatProviderBrand(provider)} · ${m.catalogLabel}',
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            )
-                            .toList(),
-                        onChanged: (m) {
-                          setLocal(() => selected = m);
-                        },
-                      ),
-                    if (catalog.isNotEmpty && selected != null) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        'API model id · ${selected!.apiModelId}',
-                        style:
-                            Theme.of(dialogContext).textTheme.bodySmall?.copyWith(
-                                  color: Theme.of(dialogContext)
-                                      .colorScheme
-                                      .onSurfaceVariant,
-                                  fontFeatures: const [FontFeature.tabularFigures()],
-                                ),
-                      ),
-                    ],
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: keyCtrl,
-                      obscureText: true,
-                      decoration: InputDecoration(
-                        labelText: 'Provider API key',
-                        border: const OutlineInputBorder(),
-                        helperText:
-                            isEdit ? 'Leave blank to keep your current API key.' : null,
-                      ),
-                    ),
-                  ],
+      title: isEdit ? 'Edit chat model' : 'Add chat model',
+      saveLabel: isEdit ? 'Save model' : 'Add model',
+      footerNote: const Text('Stored in your device keystore.'),
+      // New profiles REQUIRE a key; on edit a blank key keeps the vault entry.
+      isValid: () =>
+          selected != null && (isEdit || keyCtrl.text.trim().isNotEmpty),
+      fieldsBuilder: (BuildContext sheetContext, EditorSheetState state) {
+        sheet = state;
+        final ThemeData theme = Theme.of(sheetContext);
+        final ColorScheme scheme = theme.colorScheme;
+        final TextTheme text = theme.textTheme;
+
+        return <Widget>[
+          SegmentedButton<String>(
+            segments: <ButtonSegment<String>>[
+              for (final String p in _providers)
+                ButtonSegment<String>(
+                  value: p,
+                  label: Text(chatProviderBrand(p)),
                 ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(dialogContext),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  onPressed: () async {
-                    final sel = selected;
-                    if (sel == null) return;
-                    final messenger = ScaffoldMessenger.of(context);
-                    final keyText = keyCtrl.text.trim();
-                    if (!isEdit && keyText.isEmpty) {
-                      messenger.showSnackBar(
-                        const SnackBar(
-                          content: Text('Paste your provider API key to add this model.'),
-                        ),
-                      );
-                      return;
-                    }
-                    final pageApp = AppScope.of(context);
-                    final profileId = existing?.id ?? const Uuid().v4();
-                    final p = ChatModelProfile(
-                      id: profileId,
-                      displayName: composeChatDisplayName(provider, sel),
-                      provider: provider,
-                      model: sel.apiModelId,
-                    );
-                    final next = isEdit
-                        ? pageApp.chatModels
-                            .map((m) => m.id == profileId ? p : m)
-                            .toList()
-                        : [...pageApp.chatModels, p];
-                    final activeAfter = isEdit
-                        ? (pageApp.activeModelId ?? profileId)
-                        : profileId;
-                    if (!dialogContext.mounted) return;
-                    Navigator.of(dialogContext).pop();
-                    if (keyText.isNotEmpty) {
-                      await pageApp.vault.setLlmApiKey(profileId, keyText);
-                    }
-                    await pageApp.saveChatModels(next, activeId: activeAfter);
-                  },
-                  child: const Text('Save'),
-                ),
+            ],
+            selected: <String>{provider},
+            selectedIcon: const Icon(Icons.check, size: MemSize.selectionCheck),
+            onSelectionChanged: (Set<String> next) {
+              // Provider change resets the catalog and the selection.
+              provider = next.first;
+              catalog = curatedModelsForProvider(provider);
+              selected = catalog.isEmpty ? null : catalog.first;
+              state.refresh();
+            },
+          ),
+          if (drifted) ...<Widget>[
+            const SizedBox(height: MemSpace.x3),
+            _DriftWarning(storedModel: existing.model),
+          ],
+          const SizedBox(height: MemSpace.x4),
+          if (catalog.isEmpty)
+            Text(
+              'No models defined for this provider.',
+              style: text.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+            )
+          else
+            DropdownButtonFormField<CuratedChatModel>(
+              // The key is load-bearing: `initialValue` seeds the FormField
+              // once, so a provider change has to build a fresh field for the
+              // reset to land.
+              key: ValueKey<String>(provider),
+              initialValue: selected,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'Model'),
+              items: <DropdownMenuItem<CuratedChatModel>>[
+                for (final CuratedChatModel m in catalog)
+                  DropdownMenuItem<CuratedChatModel>(
+                    value: m,
+                    child: Text(m.catalogLabel, overflow: TextOverflow.ellipsis),
+                  ),
               ],
-            );
-          },
+              onChanged: (CuratedChatModel? m) {
+                selected = m;
+                state.refresh();
+              },
+            ),
+          if (selected != null) ...<Widget>[
+            const SizedBox(height: MemSpace.x2),
+            Text(
+              'API model id · ${selected!.apiModelId}',
+              style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ],
+          const SizedBox(height: MemSpace.x4),
+          TextField(
+            controller: keyCtrl,
+            obscureText: !_reveal,
+            autocorrect: false,
+            enableSuggestions: false,
+            onChanged: (String _) => state.refresh(),
+            decoration: InputDecoration(
+              labelText: 'Provider API key',
+              helperText: isEdit
+                  ? 'Leave blank to keep the stored key.'
+                  : 'Required for a new model.',
+              suffixIcon: IconButton(
+                tooltip: _reveal ? 'Hide key' : 'Show key',
+                icon: Icon(
+                  _reveal
+                      ? Icons.visibility_off_outlined
+                      : Icons.visibility_outlined,
+                ),
+                onPressed: () => _toggleReveal(state),
+              ),
+            ),
+          ),
+        ];
+      },
+      onSave: (BuildContext sheetContext) async {
+        final CuratedChatModel? sel = selected;
+        if (sel == null) return;
+        final String keyText = keyCtrl.text.trim();
+        if (!isEdit && keyText.isEmpty) return;
+
+        // The profile id keys BOTH the ChatModelProfile and its vault entry:
+        // an existing id is preserved, a new one is a Uuid v4.
+        final String profileId = existing?.id ?? const Uuid().v4();
+        final ChatModelProfile p = ChatModelProfile(
+          id: profileId,
+          // Always recomputed, never user-editable.
+          displayName: composeChatDisplayName(provider, sel),
+          provider: provider,
+          model: sel.apiModelId,
         );
+        final List<ChatModelProfile> next = isEdit
+            ? pageApp.chatModels
+                  .map((ChatModelProfile m) => m.id == profileId ? p : m)
+                  .toList()
+            : <ChatModelProfile>[...pageApp.chatModels, p];
+        // add -> the new profile becomes active; edit -> keep the current one.
+        final String activeAfter = isEdit
+            ? (pageApp.activeModelId ?? profileId)
+            : profileId;
+
+        if (!sheetContext.mounted) return;
+        sheet?.close();
+        if (keyText.isNotEmpty) {
+          await pageApp.vault.setLlmApiKey(profileId, keyText);
+        }
+        await pageApp.saveChatModels(next, activeId: activeAfter);
+        memSnack(messenger, isEdit ? 'Chat model saved.' : 'Chat model added.');
       },
     );
-    // Don't dispose immediately after showDialog returns; the route can still
-    // be finishing teardown animations and briefly rebuild the TextField.
+
+    _resetReveal();
   }
 
   Future<void> _confirmRemoveModel(ChatModelProfile m) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Remove chat model?'),
-        content: Text('“${m.displayName}” will be removed from this device.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Remove')),
-        ],
-      ),
+    final bool ok = await confirmDestructive(
+      context,
+      title: 'Remove chat model?',
+      consequence:
+          '“${m.displayName}” and its stored key are removed from this device.',
+      actionLabel: 'Remove',
     );
-    if (ok != true || !mounted) return;
-    final app = AppScope.of(context);
-    final next = app.chatModels.where((x) => x.id != m.id).toList(growable: false);
+    if (!ok || !mounted) return;
+    final ScaffoldMessengerState messenger = messengerOf();
+    final AppState app = AppScope.of(context);
+    final List<ChatModelProfile> next = app.chatModels
+        .where((ChatModelProfile x) => x.id != m.id)
+        .toList(growable: false);
+    // The vault key is deleted BEFORE saveChatModels.
     await app.vault.setLlmApiKey(m.id, null);
-    final newActive = next.isEmpty
+    // remove-active -> promote the first; remove-last -> null.
+    final String? newActive = next.isEmpty
         ? null
         : (app.activeModelId == m.id ? next.first.id : app.activeModelId);
     await app.saveChatModels(next, activeId: newActive);
+    if (!mounted) return;
+    memSnack(messenger, 'Chat model removed.');
   }
+
+  // ----------------------------------------------------------------- build
 
   @override
   Widget build(BuildContext context) {
-    final app = AppScope.of(context);
+    final AppState app = AppScope.of(context);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
-      body: ListView(
-            padding: const EdgeInsets.all(20),
-            children: [
-          Text(
-            'Credentials',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Mem REST API key comes from Mem Settings → API. It powers Notes, '
-            'capture, and is the preferred path for chat tools (same quotas as MCP).',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _apiKeyCtrl,
-            obscureText: _maskKey,
-            decoration: InputDecoration(
-              labelText: 'Mem API key',
-              border: const OutlineInputBorder(),
-              suffixIcon: IconButton(
-                icon: Icon(_maskKey ? Icons.visibility : Icons.visibility_off),
-                onPressed: () => setState(() => _maskKey = !_maskKey),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          FilledButton(onPressed: _saveApiKey, child: const Text('Save API key')),
-          const SizedBox(height: 24),
-          Text('MCP OAuth', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          Text(
-            'Uses Mem’s hosted OAuth (see ${MemMcpOAuth.redirectUrl}). Required '
-            'for MCP JSON-RPC tools if you choose not to use a REST API key.',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-          ),
-          const SizedBox(height: 8),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text(
-              app.mcpConnected ? 'MCP: connected' : 'MCP: not connected',
-            ),
-          ),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              FilledButton(
-                onPressed: app.mcpConnected ? null : _connectMcp,
-                child: const Text('Connect MCP (browser)'),
-              ),
-              OutlinedButton(
-                onPressed: app.mcpConnected
-                    ? () => app.disconnectMcp()
-                    : null,
-                child: const Text('Disconnect'),
-              ),
+      body: SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          // A settings page is a short, fixed list whose section anchors must
+          // all be laid out for `Scrollable.ensureVisible` to reach them, so
+          // it is deliberately not virtualised.
+          padding: const EdgeInsets.only(bottom: MemSpace.sectionGap),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              const SizedBox(height: MemSpace.x4),
+              _buildSetupCard(app),
+              _buildAccountSection(app),
+              ..._buildModelsSection(app),
+              ..._buildVoiceSection(app),
+              _buildAutomationSection(app),
+              ..._buildAppearanceSection(app),
+              _buildSecuritySection(),
             ],
           ),
-          const SizedBox(height: 24),
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              Text(
-                'Chat models',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              FilledButton.tonal(
-                onPressed: () => _showChatModelEditor(),
-                child: const Text('Add model'),
-              ),
-            ],
+        ),
+      ),
+    );
+  }
+
+  /// The first-run orientation surface. All three tiles read from the same
+  /// inputs as `AppState.setupComplete`, which is also what drives the gear
+  /// badge — so the badge and this card can never disagree.
+  Widget _buildSetupCard(AppState app) {
+    final bool hasKey = app.hasMemRest;
+    final bool hasModels = app.chatModels.isNotEmpty;
+    final ChatModelProfile? active = _activeProfile(app);
+    final bool hasVoiceKey = _voiceKeyMask != null;
+    final int count = app.chatModels.length;
+
+    return AppListSection(
+      children: <Widget>[
+        StatusTile(
+          icon: Icons.cloud_outlined,
+          label: 'Mem account',
+          level: hasKey ? StatusLevel.ok : StatusLevel.error,
+          status: hasKey ? 'Connected' : 'Add your API key',
+          onTap: () => _scrollTo(SettingsSection.account),
+        ),
+        StatusTile(
+          icon: active == null
+              ? Icons.smart_toy_outlined
+              : ProviderBadge.glyphFor(active.provider),
+          label: 'Chat models',
+          level: hasModels ? StatusLevel.ok : StatusLevel.error,
+          status: hasModels
+              ? '$count ${count == 1 ? 'model' : 'models'}'
+              : 'Add a chat model',
+          detail: active == null ? null : '${active.displayName} active',
+          onTap: () => _scrollTo(SettingsSection.models),
+        ),
+        StatusTile(
+          icon: Icons.mic_none_outlined,
+          label: 'Voice',
+          level: hasVoiceKey ? StatusLevel.ok : StatusLevel.neutral,
+          status: hasVoiceKey ? 'Key saved · $_voiceKeyMask' : 'Using chat key',
+          detail: hasVoiceKey
+              ? null
+              : 'Falls back to your OpenAI chat model key.',
+          onTap: () => _scrollTo(SettingsSection.voice),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAccountSection(AppState app) {
+    final bool hasKey = app.hasMemRest;
+    final String keyStatus = hasKey
+        ? (_memKeyMask == null ? 'Key saved' : 'Key saved · $_memKeyMask')
+        : 'Not set';
+
+    return AppListSection(
+      header: SectionHeader(
+        key: _anchors[SettingsSection.account],
+        label: 'Account',
+        // AppListSection owns the horizontal margin and the 8 dp header gap;
+        // this only has to supply the 24 dp gap from the previous section.
+        padding: const EdgeInsets.only(top: MemSpace.sectionGap),
+      ),
+      children: <Widget>[
+        StatusTile(
+          icon: Icons.key_outlined,
+          label: 'Mem API key',
+          level: hasKey ? StatusLevel.ok : StatusLevel.error,
+          status: keyStatus,
+          detail: 'Powers Notes, capture, and Mem chat tools.',
+          actionLabel: 'Edit',
+          onAction: () => unawaited(_showMemKeySheet(app)),
+        ),
+        StatusTile(
+          icon: Icons.hub_outlined,
+          label: 'Mem MCP',
+          level: _mcpBusy
+              ? StatusLevel.pending
+              : (app.mcpConnected ? StatusLevel.ok : StatusLevel.neutral),
+          status: _mcpBusy
+              ? 'Waiting for browser…'
+              : (app.mcpConnected ? 'Connected' : 'Not connected'),
+          detail: 'Optional — chat tools prefer your Mem API key.',
+          busy: _mcpBusy,
+          actionLabel: app.mcpConnected ? 'Disconnect' : 'Connect',
+          onAction: app.mcpConnected
+              ? () => unawaited(_disconnectMcp(app))
+              : () => unawaited(_connectMcp(app)),
+        ),
+      ],
+    );
+  }
+
+  List<Widget> _buildModelsSection(AppState app) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    final TextTheme text = theme.textTheme;
+
+    final List<Widget> rows = <Widget>[
+      for (final ChatModelProfile m in app.chatModels)
+        AppRow(
+          leading: ProviderBadge(provider: m.provider, showName: false),
+          title: Text(m.displayName),
+          meta: Text(
+            m.model,
+            style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
-          const SizedBox(height: 8),
-          ...app.chatModels.map((m) {
-            return Card(
-              child: RadioListTile<String>(
-                title: Text(m.displayName),
-                subtitle: Text(m.model),
-                value: m.id,
-                groupValue: app.activeModelId,
-                onChanged: (v) => app.setActiveModel(v),
-                secondary: PopupMenuButton<String>(
-                  tooltip: 'Model actions',
-                  onSelected: (v) {
-                    if (v == 'edit') {
-                      _showChatModelEditor(existing: m);
-                    } else if (v == 'remove') {
-                      _confirmRemoveModel(m);
-                    }
-                  },
-                  itemBuilder: (ctx) => const [
-                    PopupMenuItem(value: 'edit', child: Text('Edit')),
-                    PopupMenuItem(value: 'remove', child: Text('Remove')),
-                  ],
-                ),
-              ),
-            );
-          }),
-          const SizedBox(height: 24),
-          Text(
-            'Voice transcription (OpenAI)',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Voice capture uses OpenAI transcription models. You can use a dedicated '
-            'OpenAI key here, or leave it blank to reuse an OpenAI chat model key.',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-          ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<String>(
-            value: app.voiceWhisperModel,
-            items: _voiceModels
-                .map(
-                  (m) => DropdownMenuItem<String>(
-                    value: m.$1,
-                    child: Text(m.$2),
-                  ),
-                )
-                .toList(),
-            decoration: const InputDecoration(
-              labelText: 'Voice model',
-              border: OutlineInputBorder(),
+          selected: m.id == app.activeModelId,
+          // Row tap sets the active model — the RadioListTile is retired.
+          onTap: m.id == app.activeModelId
+              ? null
+              : () => app.setActiveModel(m.id),
+          trailing: SizedBox(
+            width: MemSize.touchTarget,
+            height: MemSize.touchTarget,
+            child: PopupMenuButton<String>(
+              tooltip: 'Model actions',
+              icon: const Icon(Icons.more_vert),
+              onSelected: (String v) {
+                if (v == 'edit') {
+                  unawaited(_showChatModelEditor(existing: m));
+                } else if (v == 'remove') {
+                  unawaited(_confirmRemoveModel(m));
+                }
+              },
+              itemBuilder: (BuildContext _) => const <PopupMenuEntry<String>>[
+                PopupMenuItem<String>(value: 'edit', child: Text('Edit')),
+                PopupMenuItem<String>(value: 'remove', child: Text('Remove')),
+              ],
             ),
-            onChanged: (v) {
-              if (v != null) {
-                app.setVoiceWhisperModel(v);
-              }
-            },
           ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _voiceOpenAiKeyCtrl,
-            obscureText: _maskVoiceKey,
-            decoration: InputDecoration(
-              labelText: 'OpenAI API key for voice (optional)',
-              border: const OutlineInputBorder(),
-              helperText: 'Leave blank to fallback to any configured OpenAI chat key.',
-              suffixIcon: IconButton(
-                icon: Icon(_maskVoiceKey ? Icons.visibility : Icons.visibility_off),
-                onPressed: () => setState(() => _maskVoiceKey = !_maskVoiceKey),
+        ),
+    ];
+
+    return <Widget>[
+      AppListSection(
+        header: SectionHeader(
+          key: _anchors[SettingsSection.models],
+          label: 'Chat models',
+          padding: const EdgeInsets.only(top: MemSpace.sectionGap),
+        ),
+        children: rows.isEmpty
+            ? const <Widget>[
+                EmptyState(
+                  icon: Icons.smart_toy_outlined,
+                  headline: 'No chat models',
+                  body: 'Add a provider key to start chatting with your notes.',
+                ),
+              ]
+            : rows,
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(
+          MemInsets.pageH,
+          MemSpace.x3,
+          MemInsets.pageH,
+          0,
+        ),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton.tonal(
+            onPressed: () => unawaited(_showChatModelEditor()),
+            child: const Text('Add model'),
+          ),
+        ),
+      ),
+    ];
+  }
+
+  List<Widget> _buildVoiceSection(AppState app) {
+    final bool hasVoiceKey = _voiceKeyMask != null;
+
+    return <Widget>[
+      SectionHeader(key: _anchors[SettingsSection.voice], label: 'Voice'),
+      Padding(
+        padding: MemSpace.pageHorizontal,
+        child: DropdownButtonFormField<String>(
+          initialValue: app.voiceWhisperModel,
+          isExpanded: true,
+          decoration: const InputDecoration(labelText: 'Transcription model'),
+          items: <DropdownMenuItem<String>>[
+            for (final (String id, String label) in _voiceModels)
+              DropdownMenuItem<String>(value: id, child: Text(label)),
+          ],
+          onChanged: (String? v) {
+            if (v != null) unawaited(app.setVoiceWhisperModel(v));
+          },
+        ),
+      ),
+      const SizedBox(height: MemSpace.x3),
+      AppListSection(
+        children: <Widget>[
+          StatusTile(
+            icon: Icons.vpn_key_outlined,
+            label: 'OpenAI key',
+            level: hasVoiceKey ? StatusLevel.ok : StatusLevel.neutral,
+            status: hasVoiceKey ? 'Key saved · $_voiceKeyMask' : 'Not set',
+            detail: 'Uses your chat model key when empty.',
+            actionLabel: 'Edit',
+            onAction: () => unawaited(_showVoiceKeySheet(app)),
+          ),
+        ],
+      ),
+    ];
+  }
+
+  Widget _buildAutomationSection(AppState app) {
+    final int jobs = app.promptTemplates.length;
+    final int pinned = app.pinnedTemplateIds.length;
+    final String subtitle = jobs == 0
+        ? 'No jobs yet'
+        : '$jobs ${jobs == 1 ? 'job' : 'jobs'} · $pinned pinned';
+
+    return AppListSection(
+      header: SectionHeader(
+        key: _anchors[SettingsSection.automation],
+        label: 'Automation',
+        padding: const EdgeInsets.only(top: MemSpace.sectionGap),
+      ),
+      children: <Widget>[
+        AppRow(
+          leading: const Icon(Icons.bolt_outlined),
+          title: const Text('Prompt jobs'),
+          subtitle: Text(subtitle),
+          subtitleMaxLines: 1,
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => unawaited(
+            Navigator.of(context).push<void>(
+              MaterialPageRoute<void>(
+                builder: (BuildContext _) => const PromptJobsPage(),
               ),
             ),
           ),
-          const SizedBox(height: 8),
-          FilledButton.tonal(
-            onPressed: _saveVoiceSettings,
-            child: const Text('Save voice settings'),
-          ),
-          const SizedBox(height: 24),
-          Text(
-            'Prompt jobs',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Save multi-step MCP chat templates (e.g. triage uncategorized notes), '
-            'run them from Chat, pin up to four on the Android home widget, '
-            'and get a notification when a widget-triggered run finishes.',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-          ),
-          const SizedBox(height: 12),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(
-              Icons.bolt_outlined,
-              color: Theme.of(context).colorScheme.primary,
+        ),
+      ],
+    );
+  }
+
+  List<Widget> _buildAppearanceSection(AppState app) {
+    return <Widget>[
+      SectionHeader(
+        key: _anchors[SettingsSection.appearance],
+        label: 'Appearance',
+      ),
+      Padding(
+        padding: MemSpace.pageHorizontal,
+        child: SegmentedButton<ThemeMode>(
+          segments: const <ButtonSegment<ThemeMode>>[
+            ButtonSegment<ThemeMode>(
+              value: ThemeMode.system,
+              label: Text('System'),
             ),
-            title: const Text('Manage prompt jobs'),
-            subtitle: const Text('Edit, reorder pins for the widget'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.of(context).push<void>(
-                  MaterialPageRoute(builder: (_) => const PromptJobsPage()),
+            ButtonSegment<ThemeMode>(
+              value: ThemeMode.light,
+              label: Text('Light'),
+            ),
+            ButtonSegment<ThemeMode>(value: ThemeMode.dark, label: Text('Dark')),
+          ],
+          selected: <ThemeMode>{app.themeMode},
+          selectedIcon: const Icon(Icons.check, size: MemSize.selectionCheck),
+          onSelectionChanged: (Set<ThemeMode> next) =>
+              unawaited(app.setThemeMode(next.first)),
+        ),
+      ),
+    ];
+  }
+
+  Widget _buildSecuritySection() {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    final TextTheme text = theme.textTheme;
+
+    return AppListSection(
+      header: SectionHeader(
+        key: _anchors[SettingsSection.security],
+        label: 'Security',
+        padding: const EdgeInsets.only(top: MemSpace.sectionGap),
+      ),
+      children: <Widget>[
+        ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(horizontal: MemSpace.x4),
+          childrenPadding: const EdgeInsets.fromLTRB(
+            MemSpace.x4,
+            0,
+            MemSpace.x4,
+            MemSpace.x4,
+          ),
+          title: Text(
+            'Secrets stay on this device',
+            style: text.bodySmall?.copyWith(color: scheme.onSurface),
+          ),
+          children: <Widget>[
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Keys are held in the Android Keystore. Nothing leaves the '
+                'device except the calls you configure — Mem, OpenAI, '
+                'Anthropic, and Google.',
+                style: text.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
                 ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// The catalog-drift advisory, in the `warning` register.
+///
+/// It is rendered in the status-pill grammar — an 8 dp `warning` dot on a
+/// `warningContainer` with `onWarningContainer` text — because `warning` may
+/// appear only as a dot or as pill text/containers (§2.5), never as loose
+/// coloured prose.
+class _DriftWarning extends StatelessWidget {
+  const _DriftWarning({required this.storedModel});
+
+  final String storedModel;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final MemSemanticColors sem = memSemanticColorsOf(context);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: MemSpace.x3,
+        vertical: MemSpace.x2,
+      ),
+      decoration: BoxDecoration(
+        color: sem.warningContainer,
+        borderRadius: MemRadius.controlAll,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.only(top: MemSpace.x1),
+            child: Container(
+              width: MemSize.statusDot,
+              height: MemSize.statusDot,
+              decoration: BoxDecoration(
+                color: sem.warning,
+                shape: BoxShape.circle,
+              ),
+            ),
           ),
-          const SizedBox(height: 24),
-          Text('Security', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          Text(
-            'Secrets live in flutter_secure_storage (Android Keystore-backed). '
-            'Nothing is sent to third parties except the providers you configure '
-            '(Mem, OpenAI, Anthropic, Gemini, …).',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+          const SizedBox(width: MemSpace.x2),
+          Expanded(
+            child: Text(
+              '“$storedModel” is no longer in the catalog. A replacement is '
+              'selected below.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: sem.onWarningContainer,
+              ),
+            ),
           ),
-            ],
-          ),
-        );
+        ],
+      ),
+    );
   }
 }
