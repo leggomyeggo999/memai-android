@@ -1,0 +1,840 @@
+name: Release
+
+# Builds the four shippable MemDroid artifacts:
+#   1. Android  — split-per-ABI APKs, a universal APK, and an AAB (ubuntu-latest)
+#   2. macOS    — .dmg containing an UNSIGNED MemDroid.app (macos-latest)
+#   3. Windows  — Inno Setup 6 installer .exe (windows-latest)
+#   4. iOS      — signed .ipa uploaded to TestFlight (macos-latest, secret-gated)
+#
+# Triggers:
+#   * push of a tag matching v*  -> build everything AND publish a GitHub Release
+#   * workflow_dispatch          -> build everything, upload as workflow artifacts only
+#
+# This workflow is independent of .github/workflows/flutter_ci.yml (analyze/test +
+# Android emulator integration test), which still gates pushes and PRs to main.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version override for artifact names (default: pubspec.yaml version)"
+        required: false
+        type: string
+      run_ios:
+        description: "Attempt the iOS/TestFlight job (still requires all signing secrets)"
+        required: false
+        default: true
+        type: boolean
+
+# Least privilege by default. Only the `release` job widens this to contents: write.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Pinned so a release is reproducible rather than drifting with whatever "stable"
+  # happens to be on the runner. Bump this one line when the project moves Flutter
+  # versions (see docs/RELEASING.md).
+  FLUTTER_VERSION: "3.44.5"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve the version ONCE and decide up front whether iOS can run.
+  #
+  # The `secrets` context is NOT available in a job-level `if:`, so the iOS
+  # secret check has to happen inside a step (where secrets *are* readable) and
+  # be surfaced as a job output that the iOS job can gate on.
+  # ---------------------------------------------------------------------------
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      is_release: ${{ steps.resolve.outputs.is_release }}
+      ios_ready: ${{ steps.ios_secrets.outputs.ios_ready }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and release mode
+        id: resolve
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          # A tag push is the only thing that produces a GitHub Release.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            IS_RELEASE=true
+          else
+            IS_RELEASE=false
+          fi
+
+          # Precedence: explicit dispatch input > pushed tag > pubspec.yaml.
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VERSION="${INPUT_VERSION}"
+            SOURCE="workflow_dispatch input"
+          elif [[ "${IS_RELEASE}" == "true" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            SOURCE="git tag ${GITHUB_REF_NAME}"
+          else
+            # pubspec line looks like: version: 1.0.3+4  -> we want 1.0.3
+            VERSION="$(grep -m1 -E '^version:' pubspec.yaml \
+              | sed -E 's/^version:[[:space:]]*//' \
+              | tr -d "\"'" \
+              | cut -d'+' -f1 \
+              | tr -d '[:space:]')"
+            SOURCE="pubspec.yaml"
+          fi
+
+          # Strip a stray leading v and refuse to continue on an empty value —
+          # an empty version silently produces artifacts named "MemDroid--macos.dmg".
+          VERSION="${VERSION#v}"
+          if [[ -z "${VERSION}" ]]; then
+            echo "::error::Could not resolve a version (source: ${SOURCE})."
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "is_release=${IS_RELEASE}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Release build"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Source | ${SOURCE} |"
+            echo "| Publish GitHub Release | ${IS_RELEASE} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # -------------------------------------------------------------------------
+      # USER-SUPPLIED SECRETS REQUIRED FOR THE iOS JOB.
+      # If any are missing the iOS job is SKIPPED (not failed) so the Android /
+      # macOS / Windows artifacts still ship. See docs/RELEASING.md for how to
+      # obtain each value.
+      # -------------------------------------------------------------------------
+      - name: Check iOS / TestFlight secrets
+        id: ios_secrets
+        shell: bash
+        env:
+          RUN_IOS: ${{ inputs.run_ios }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          IOS_DIST_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_DIST_CERTIFICATE_P12_BASE64 }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          IOS_PROVISIONING_PROFILE_NAME: ${{ secrets.IOS_PROVISIONING_PROFILE_NAME }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          # Empty (workflow_dispatch not used) counts as "yes, try iOS".
+          if [[ "${RUN_IOS:-true}" == "false" ]]; then
+            echo "ios_ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=iOS skipped::run_ios input was set to false."
+            echo "> **iOS/TestFlight skipped** — \`run_ios\` input was false." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # NOTE: IOS_DIST_CERTIFICATE_PASSWORD is deliberately NOT required —
+          # a .p12 may legitimately have an empty passphrase.
+          REQUIRED=(
+            APP_STORE_CONNECT_KEY_ID
+            APP_STORE_CONNECT_ISSUER_ID
+            APP_STORE_CONNECT_PRIVATE_KEY
+            IOS_DIST_CERTIFICATE_P12_BASE64
+            IOS_PROVISIONING_PROFILE_BASE64
+            IOS_PROVISIONING_PROFILE_NAME
+            IOS_TEAM_ID
+          )
+
+          MISSING=()
+          for name in "${REQUIRED[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              MISSING+=("$name")
+            fi
+          done
+
+          if [[ ${#MISSING[@]} -gt 0 ]]; then
+            echo "ios_ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=iOS/TestFlight skipped::Missing repository secrets: ${MISSING[*]}"
+            {
+              echo ""
+              echo "> **iOS/TestFlight skipped** — the following repository secrets are not set:"
+              echo ">"
+              for name in "${MISSING[@]}"; do echo "> - \`${name}\`"; done
+              echo ">"
+              echo "> The rest of the release is unaffected. See \`docs/RELEASING.md\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ios_ready=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=iOS/TestFlight enabled::All signing secrets present."
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 1. ANDROID — no secrets needed.
+  # android/app/build.gradle.kts uses the release keystore only when
+  # android/key.properties exists and falls back to DEBUG signing otherwise,
+  # so these artifacts build unsigned-for-distribution out of the box.
+  # ---------------------------------------------------------------------------
+  android:
+    name: Android (APK + AAB)
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - run: flutter --version
+      - run: flutter pub get
+
+      # --build-name only: leaving --build-number alone preserves the versionCode
+      # from pubspec.yaml, so a CI run can never regress the Play Store version code.
+      - name: Build split-per-ABI APKs
+        run: flutter build apk --release --split-per-abi --build-name="$VERSION"
+
+      - name: Build universal APK
+        run: flutter build apk --release --build-name="$VERSION"
+
+      - name: Build app bundle
+        run: flutter build appbundle --release --build-name="$VERSION"
+
+      - name: Stage and rename artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          APK_DIR="build/app/outputs/flutter-apk"
+          AAB="build/app/outputs/bundle/release/app-release.aab"
+
+          echo "--- produced by gradle ---"
+          ls -la "$APK_DIR" || true
+          ls -la "$(dirname "$AAB")" || true
+
+          # Every copy is checked: a wrong path here would otherwise produce a
+          # green build with a missing or mislabelled artifact.
+          copy() {
+            local src="$1" dst="$2"
+            if [[ ! -f "$src" ]]; then
+              echo "::error::Expected build output not found: $src"
+              exit 1
+            fi
+            cp "$src" "dist/$dst"
+            echo "staged $dst"
+          }
+
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            copy "$APK_DIR/app-${abi}-release.apk" "MemDroid-${VERSION}-android-${abi}.apk"
+          done
+
+          # `--split-per-abi` does not emit app-release.apk, so after the second
+          # build this file is unambiguously the universal APK.
+          copy "$APK_DIR/app-release.apk" "MemDroid-${VERSION}-android-universal.apk"
+          copy "$AAB" "MemDroid-${VERSION}-android.aab"
+
+          cat > dist/README-Android-signing.txt <<EOF
+          MemDroid ${VERSION} — Android artifacts
+
+          These APKs and the AAB are signed with the Flutter/Android DEBUG key.
+          No release keystore was configured for this build.
+
+          They install fine for sideloading and testing, but they CANNOT be
+          uploaded to Google Play, and they will not upgrade over an install
+          that was signed with a different key.
+
+          To produce release-signed builds, add android/key.properties
+          (storeFile / storePassword / keyAlias / keyPassword) before building.
+          The name must be exactly key.properties — any other name is ignored
+          silently and you get another debug-signed build.
+          See docs/RELEASING.md.
+          EOF
+
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memdroid-android-${{ needs.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 2. macOS DMG — no secrets needed. The .app is UNSIGNED and UNNOTARIZED.
+  # ---------------------------------------------------------------------------
+  macos-dmg:
+    name: macOS (DMG)
+    needs: version
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - run: flutter --version
+      - run: flutter config --enable-macos-desktop
+      - run: flutter pub get
+
+      - name: Build macOS app
+        run: flutter build macos --release --build-name="$VERSION"
+
+      # -------------------------------------------------------------------------
+      # DMG packaging: plain `hdiutil create`, deliberately NOT `create-dmg`.
+      #
+      # Rationale:
+      #   * create-dmg needs `brew install create-dmg` (network dependency + ~1 min)
+      #     purely to get a prettier window background, which we do not need.
+      #   * create-dmg is well known for exiting non-zero even on a successful
+      #     build (its AppleScript window-arrangement step returns 1 when no GUI
+      #     session is attached — exactly the CI case), which forces an ugly
+      #     `|| true` that then masks real failures.
+      #   * hdiutil ships with macOS, is deterministic, and its exit code is
+      #     trustworthy.
+      # Trade-off accepted: no custom volume background or icon layout. The
+      # /Applications symlink still gives the standard drag-to-install gesture.
+      # -------------------------------------------------------------------------
+      - name: Package DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          PRODUCTS="build/macos/Build/Products/Release"
+          echo "--- produced by xcodebuild ---"
+          ls -la "$PRODUCTS" || true
+
+          # Discover the .app rather than hardcoding, but fail loudly if the
+          # result is anything other than exactly one bundle.
+          shopt -s nullglob
+          APPS=("$PRODUCTS"/*.app)
+          shopt -u nullglob
+          if [[ ${#APPS[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one .app in $PRODUCTS, found ${#APPS[@]}: ${APPS[*]:-<none>}"
+            exit 1
+          fi
+          APP="${APPS[0]}"
+          APP_NAME="$(basename "$APP" .app)"
+          echo "Packaging: $APP"
+
+          STAGE="$(mktemp -d)/${APP_NAME}"
+          mkdir -p "$STAGE"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+
+          DMG="dist/MemDroid-${VERSION}-macos.dmg"
+          # -fs HFS+ (not APFS) so the image mounts on older macOS releases too.
+          hdiutil create \
+            -volname "MemDroid ${VERSION}" \
+            -srcfolder "$STAGE" \
+            -fs HFS+ \
+            -format UDZO \
+            -ov \
+            "$DMG"
+
+          # hdiutil is honest about failure, but verify anyway.
+          if [[ ! -f "$DMG" ]]; then
+            echo "::error::DMG was not created at $DMG"
+            exit 1
+          fi
+          hdiutil verify "$DMG"
+
+          cat > dist/README-macOS-Gatekeeper.txt <<EOF
+          MemDroid ${VERSION} — macOS
+
+          This app is NOT code-signed and NOT notarized by Apple. Gatekeeper will
+          refuse to open it on first launch with a message such as
+          "MemDroid is damaged and can't be opened" or
+          "cannot be opened because the developer cannot be verified".
+
+          That message does not mean the download is corrupt. To run it:
+
+            1. Open the .dmg and drag MemDroid.app to /Applications.
+            2. In Terminal, clear the quarantine attribute:
+
+                 xattr -dr com.apple.quarantine /Applications/MemDroid.app
+
+            3. Launch MemDroid normally.
+
+          Alternative (no Terminal): right-click (or Control-click) MemDroid.app
+          in /Applications, choose Open, then confirm Open in the dialog. On
+          macOS 15+ you may instead need
+          System Settings > Privacy & Security > "Open Anyway".
+
+          Only do this because you trust the source of this build.
+          EOF
+
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memdroid-macos-${{ needs.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 3. WINDOWS — Inno Setup 6 installer. No secrets needed (installer is unsigned).
+  # Depends on installers/windows/memdroid.iss existing and accepting /DAppVersion=.
+  # ---------------------------------------------------------------------------
+  windows-inno:
+    name: Windows (Inno Setup installer)
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - run: flutter --version
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+
+      - name: Build Windows app
+        run: flutter build windows --release --build-name="$env:VERSION"
+
+      - name: Locate build output
+        id: winbuild
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Normally build/windows/x64/runner/Release, but the arch segment has
+          # changed across Flutter versions (and arm64 runners exist), so find it.
+          $exe = Get-ChildItem -Path 'build\windows' -Recurse -Filter 'MemDroid.exe' -ErrorAction SilentlyContinue |
+                 Where-Object { $_.DirectoryName -like '*\Release' } |
+                 Select-Object -First 1
+          if (-not $exe) {
+            Write-Output "::error::MemDroid.exe not found under build\windows. Contents:"
+            Get-ChildItem -Path 'build\windows' -Recurse -Directory | Select-Object -ExpandProperty FullName
+            exit 1
+          }
+          Write-Output "Release dir: $($exe.DirectoryName)"
+          Get-ChildItem $exe.DirectoryName | Select-Object Name,Length
+          "release_dir=$($exe.DirectoryName)" >> $env:GITHUB_OUTPUT
+
+      - name: Install Inno Setup 6
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup --no-progress --yes
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed with $LASTEXITCODE" }
+
+      - name: Compile installer
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $iss = 'installers\windows\memdroid.iss'
+          if (-not (Test-Path $iss)) {
+            Write-Output "::error::Inno Setup script not found at $iss"
+            exit 1
+          }
+
+          # Resolve ISCC: prefer the canonical install path, fall back to the
+          # chocolatey shim on PATH.
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) {
+            $cmd = Get-Command iscc -ErrorAction SilentlyContinue
+            if ($cmd) { $iscc = $cmd.Source } else { throw "ISCC.exe not found after installing Inno Setup." }
+          }
+          Write-Output "Using ISCC: $iscc"
+
+          $dist = Join-Path $PWD 'dist'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $base = "MemDroid-$env:VERSION-windows-setup"
+
+          # /O and /F override OutputDir / OutputBaseFilename from the .iss, so this
+          # job controls the artifact name regardless of what the script declares.
+          # /DAppVersion= and /DBuildDir= are the documented defines the .iss
+          # consumes. Passing BuildDir explicitly from the previous step is what
+          # makes that step's search meaningful: the .iss otherwise falls back to a
+          # hardcoded build\windows\x64\runner\Release, so on any runner where the
+          # arch segment is not literally "x64" the located directory would be
+          # ignored and the .iss preflight would fail the compile.
+          $releaseDir = '${{ steps.winbuild.outputs.release_dir }}'
+          if (-not (Test-Path $releaseDir)) { throw "Release dir not found: $releaseDir" }
+          & $iscc "/DAppVersion=$env:VERSION" "/DBuildDir=$releaseDir" "/O$dist" "/F$base" $iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+          $setup = Join-Path $dist "$base.exe"
+          if (-not (Test-Path $setup)) {
+            Write-Output "::error::Installer not produced at $setup"
+            Get-ChildItem $dist -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Get-ChildItem $dist | Select-Object Name,Length
+
+      - name: Add unsigned-installer note
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Built as an array rather than a PowerShell here-string: a here-string
+          # terminator must sit at column 0, which is impossible inside an
+          # indented YAML block scalar.
+          $note = @(
+            "MemDroid $env:VERSION - Windows"
+            ""
+            "This installer is NOT Authenticode-signed. Windows SmartScreen will"
+            "show a 'Windows protected your PC' warning the first time you run it."
+            "Choose 'More info' then 'Run anyway' if you trust the source of this"
+            "build."
+            ""
+            "The application itself is unaffected once installed."
+          ) -join "`r`n"
+          Set-Content -Path 'dist\README-Windows-SmartScreen.txt' -Value $note -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memdroid-windows-${{ needs.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 4. iOS -> TestFlight.
+  #
+  # GATED: runs ONLY when needs.version.outputs.ios_ready == 'true', which the
+  # `version` job sets after confirming every required signing secret is
+  # non-empty. Missing secrets => this job is SKIPPED, and the release job below
+  # deliberately does not require it, so Android/macOS/Windows still ship.
+  # ---------------------------------------------------------------------------
+  ios-testflight:
+    name: iOS (TestFlight)
+    needs: version
+    if: ${{ needs.version.outputs.ios_ready == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # TestFlight requires a strictly increasing CFBundleVersion per version
+      # string. github.run_number is monotonic for this workflow. See
+      # docs/RELEASING.md if you ever need to offset it.
+      BUILD_NUMBER: ${{ github.run_number }}
+      # NOTE: the `runner` context is NOT available in job-level env (GitHub
+      # rejects the whole workflow file at parse time with "Unrecognized
+      # named-value: 'runner'"), so KEYCHAIN_PATH is exported to GITHUB_ENV by
+      # the signing step below instead of being declared here.
+      IOS_BUNDLE_ID: com.memai.memaiAndroid
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - run: flutter --version
+      - run: flutter pub get
+
+      # -------------------------------------------------------------------------
+      # USER-SUPPLIED SECRETS: distribution certificate + provisioning profile.
+      # The keychain is temporary and is destroyed by the `if: always()` cleanup
+      # step at the end of this job.
+      # -------------------------------------------------------------------------
+      - name: Import signing certificate and provisioning profile
+        env:
+          CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERTIFICATE_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.IOS_DIST_CERTIFICATE_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Declared here (not in job-level env) because the `runner` context is
+          # unavailable there — see the note on the job's env block.
+          KEYCHAIN_PATH="${RUNNER_TEMP}/memdroid-signing.keychain-db"
+          echo "KEYCHAIN_PATH=${KEYCHAIN_PATH}" >> "$GITHUB_ENV"
+
+          # Random, single-use keychain password — never a repository secret.
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          echo "::add-mask::${KEYCHAIN_PASSWORD}"
+          echo "KEYCHAIN_PASSWORD=${KEYCHAIN_PASSWORD}" >> "$GITHUB_ENV"
+
+          CERT_PATH="${RUNNER_TEMP}/dist-cert.p12"
+          PROFILE_PATH="${RUNNER_TEMP}/profile.mobileprovision"
+
+          # `base64 --decode -o <file>` is the form Apple/GitHub document for
+          # macOS runners; plain `-d` is not portable across macOS base64 builds.
+          echo -n "$CERT_P12_BASE64" | base64 --decode -o "$CERT_PATH"
+          echo -n "$PROFILE_BASE64" | base64 --decode -o "$PROFILE_PATH"
+
+          for f in "$CERT_PATH" "$PROFILE_PATH"; do
+            if [[ ! -s "$f" ]]; then
+              echo "::error::Decoded an empty file at $f — the base64 secret is malformed."
+              exit 1
+            fi
+          done
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$CERT_PATH" \
+            -P "${CERT_PASSWORD:-}" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          # Lets codesign use the key without an interactive prompt.
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+
+          # Apple's documented runner recipe: make this the user search list.
+          # System roots still resolve from the System keychain.
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          cp "$PROFILE_PATH" "$PROFILE_DIR/memdroid.mobileprovision"
+
+          rm -f "$CERT_PATH"
+
+          echo "Identities available for signing:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Write ExportOptions.plist
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          IOS_PROVISIONING_PROFILE_NAME: ${{ secrets.IOS_PROVISIONING_PROFILE_NAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Generated at runtime rather than committed so the team ID and profile
+          # name stay in secrets and never land in the repository.
+          #
+          # method: "app-store-connect" is the Xcode 16+ spelling (it replaced
+          # "app-store"). macos-latest ships Xcode 16 or newer.
+          cat > "${RUNNER_TEMP}/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>${IOS_TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${IOS_BUNDLE_ID}</key>
+              <string>${IOS_PROVISIONING_PROFILE_NAME}</string>
+            </dict>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>destination</key>
+            <string>export</string>
+          </dict>
+          </plist>
+          EOF
+          plutil -lint "${RUNNER_TEMP}/ExportOptions.plist"
+
+      - name: Build signed IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter build ipa \
+            --release \
+            --build-name="$VERSION" \
+            --build-number="$BUILD_NUMBER" \
+            --export-options-plist="${RUNNER_TEMP}/ExportOptions.plist"
+
+      - name: Locate IPA
+        id: ipa
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "--- build/ios/ipa ---"
+          ls -la build/ios/ipa || true
+
+          shopt -s nullglob
+          IPAS=(build/ios/ipa/*.ipa)
+          shopt -u nullglob
+          if [[ ${#IPAS[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one .ipa in build/ios/ipa, found ${#IPAS[@]}"
+            exit 1
+          fi
+
+          mkdir -p dist
+          DEST="dist/MemDroid-${VERSION}-build${BUILD_NUMBER}.ipa"
+          cp "${IPAS[0]}" "$DEST"
+          echo "ipa_path=${DEST}" >> "$GITHUB_OUTPUT"
+          ls -la dist
+
+      # -------------------------------------------------------------------------
+      # Upload via `xcrun altool --upload-app` with App Store Connect API key auth.
+      #
+      # Chosen over `xcrun notarytool` (that tool notarizes Developer-ID *macOS*
+      # apps — it is not an App Store submission path) and over a bare
+      # iTMSTransporter invocation (undocumented argument surface). altool remains
+      # the supported CLI for App Store / TestFlight uploads and takes the same
+      # --apiKey/--apiIssuer pair, so no Apple ID password or app-specific
+      # password is ever needed.
+      #
+      # USER-SUPPLIED SECRETS: App Store Connect API key (see docs/RELEASING.md).
+      # -------------------------------------------------------------------------
+      - name: Upload to TestFlight
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          IPA_PATH: ${{ steps.ipa.outputs.ipa_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # altool searches several fixed directories for AuthKey_<KEY_ID>.p8.
+          # Write to the two it has honoured across Xcode versions.
+          for dir in "$HOME/private_keys" "$HOME/.appstoreconnect/private_keys"; do
+            mkdir -p "$dir"
+            printf '%s\n' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$dir/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+            chmod 600 "$dir/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+          done
+
+          echo "Validating $IPA_PATH ..."
+          xcrun altool --validate-app \
+            --type ios \
+            --file "$IPA_PATH" \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
+
+          echo "Uploading $IPA_PATH to App Store Connect / TestFlight ..."
+          xcrun altool --upload-app \
+            --type ios \
+            --file "$IPA_PATH" \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
+
+          {
+            echo ""
+            echo "### iOS uploaded to TestFlight"
+            echo ""
+            echo "- Version \`${VERSION}\` build \`${BUILD_NUMBER}\`"
+            echo "- Processing on App Store Connect usually takes 5-30 minutes."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memdroid-ios-${{ needs.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      # -------------------------------------------------------------------------
+      # Always destroy the temporary keychain and every decoded credential, even
+      # if the build or upload above failed.
+      # -------------------------------------------------------------------------
+      - name: Clean up signing material
+        if: always()
+        shell: bash
+        run: |
+          # KEYCHAIN_PATH is only in the env once the signing step has run.
+          if [[ -n "${KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          fi
+          rm -rf "$HOME/Library/MobileDevice/Provisioning Profiles" || true
+          rm -rf "$HOME/private_keys" "$HOME/.appstoreconnect/private_keys" || true
+          rm -f "${RUNNER_TEMP}/dist-cert.p12" \
+                "${RUNNER_TEMP}/profile.mobileprovision" \
+                "${RUNNER_TEMP}/ExportOptions.plist" || true
+
+  # ---------------------------------------------------------------------------
+  # GitHub Release — tag pushes only.
+  #
+  # `if: always()` is required because a `needs` dependency that is SKIPPED
+  # (ios-testflight, when secrets are absent) would otherwise skip this job too.
+  # The three unsigned-desktop/mobile jobs are then required explicitly, so a
+  # genuine build failure still blocks publishing. iOS is intentionally NOT
+  # required: TestFlight is its distribution channel, not the Release page.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [version, android, macos-dmg, windows-inno, ios-testflight]
+    if: >-
+      always() &&
+      needs.version.outputs.is_release == 'true' &&
+      needs.android.result == 'success' &&
+      needs.macos-dmg.result == 'success' &&
+      needs.windows-inno.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      # No `name:` filter -> downloads every artifact from this run, each into
+      # its own subdirectory of dist/. Robust to ios-testflight being skipped.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: List downloaded artifacts
+        shell: bash
+        run: find dist -type f | sort
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: MemDroid ${{ needs.version.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(needs.version.outputs.version, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/**/*.apk
+            dist/**/*.aab
+            dist/**/*.dmg
+            dist/**/*.exe
+            dist/**/*.txt
+          body: |
+            ## MemDroid ${{ needs.version.outputs.version }}
+
+            | Platform | Artifact |
+            |---|---|
+            | Android (recommended) | `MemDroid-${{ needs.version.outputs.version }}-android-arm64-v8a.apk` |
+            | Android (any device) | `MemDroid-${{ needs.version.outputs.version }}-android-universal.apk` |
+            | Android (Play upload) | `MemDroid-${{ needs.version.outputs.version }}-android.aab` |
+            | macOS | `MemDroid-${{ needs.version.outputs.version }}-macos.dmg` |
+            | Windows | `MemDroid-${{ needs.version.outputs.version }}-windows-setup.exe` |
+            | iOS | TestFlight (not attached here) |
+
+            ### Before you install
+
+            - **Android** builds are signed with the **debug** key — sideload only,
+              not uploadable to Google Play. See `README-Android-signing.txt`.
+            - **macOS** app is **unsigned and unnotarized**; you must clear the
+              quarantine attribute. See `README-macOS-Gatekeeper.txt`.
+            - **Windows** installer is **unsigned**; SmartScreen will warn.
+              See `README-Windows-SmartScreen.txt`.

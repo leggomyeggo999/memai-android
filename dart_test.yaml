@@ -1,0 +1,10 @@
+# Declares the tags used by the test suite so `flutter test` does not warn on
+# unknown tags.
+#
+#   golden — pixel-exact golden-image tests (test/golden_showcase_test.dart).
+#            Run and regenerated locally on Windows; EXCLUDED on CI because the
+#            runner's SDK lacks the material_fonts cache and cross-OS font
+#            rasterization differs pixel-for-pixel. See the header comment in
+#            test/golden_showcase_test.dart.
+tags:
+  golden:

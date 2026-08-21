@@ -9,6 +9,7 @@ import '../../app_scope.dart';
 import '../../app_state.dart';
 import '../../core/llm/chat_model_profile.dart';
 import '../../core/llm/curated_chat_models.dart';
+import '../../core/mcp/mem_oauth.dart';
 import '../../theme/mem_metrics.dart';
 import '../../theme/mem_semantic_colors.dart';
 import '../../ui/app_list_section.dart';
@@ -645,23 +646,47 @@ class _SettingsPageState extends State<SettingsPage> with AsyncPageMixin<Setting
           actionLabel: 'Edit',
           onAction: () => unawaited(_showMemKeySheet(app)),
         ),
-        StatusTile(
-          icon: Icons.hub_outlined,
-          label: 'Mem MCP',
-          level: _mcpBusy
-              ? StatusLevel.pending
-              : (app.mcpConnected ? StatusLevel.ok : StatusLevel.neutral),
-          status: _mcpBusy
-              ? 'Waiting for browser…'
-              : (app.mcpConnected ? 'Connected' : 'Not connected'),
-          detail: 'Optional — chat tools prefer your Mem API key.',
-          busy: _mcpBusy,
-          actionLabel: app.mcpConnected ? 'Disconnect' : 'Connect',
-          onAction: app.mcpConnected
-              ? () => unawaited(_disconnectMcp(app))
-              : () => unawaited(_connectMcp(app)),
-        ),
+        _buildMcpTile(app),
       ],
+    );
+  }
+
+  /// The MCP connection tile — the same [StatusTile] grammar in all three of
+  /// its states, plus a fourth for the platforms that cannot sign in at all.
+  ///
+  /// On windows and linux `flutter_appauth` has no implementation
+  /// ([MemMcpOAuth.isSupported]), so the tile states that in words and drops
+  /// its action rather than offering a Connect button that would fail. The
+  /// level stays `neutral`, not `error`: MCP is optional, the Mem API key above
+  /// is the path that works here, and the detail line says so.
+  Widget _buildMcpTile(AppState app) {
+    if (!MemMcpOAuth.isSupported) {
+      return const StatusTile(
+        icon: Icons.hub_outlined,
+        label: 'Mem MCP',
+        level: StatusLevel.neutral,
+        status: 'Not available here',
+        detail:
+            'Sign-in needs Android, iOS, or macOS. On this device chat tools '
+            'use your Mem API key.',
+      );
+    }
+
+    return StatusTile(
+      icon: Icons.hub_outlined,
+      label: 'Mem MCP',
+      level: _mcpBusy
+          ? StatusLevel.pending
+          : (app.mcpConnected ? StatusLevel.ok : StatusLevel.neutral),
+      status: _mcpBusy
+          ? 'Waiting for browser…'
+          : (app.mcpConnected ? 'Connected' : 'Not connected'),
+      detail: 'Optional — chat tools prefer your Mem API key.',
+      busy: _mcpBusy,
+      actionLabel: app.mcpConnected ? 'Disconnect' : 'Connect',
+      onAction: app.mcpConnected
+          ? () => unawaited(_disconnectMcp(app))
+          : () => unawaited(_connectMcp(app)),
     );
   }
 
