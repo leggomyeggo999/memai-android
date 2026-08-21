@@ -407,7 +407,11 @@ jobs:
   windows-inno:
     name: Windows (Inno Setup installer)
     needs: version
-    runs-on: windows-latest
+    # Pinned, not windows-latest: the latest image ships Visual Studio 2026
+    # (MSVC 14.51), whose <experimental/coroutine> header hard-errors against
+    # the C++/WinRT code in the Windows plugins. windows-2022 carries VS 2022,
+    # the toolchain this build is verified against.
+    runs-on: windows-2022
     timeout-minutes: 45
     env:
       VERSION: ${{ needs.version.outputs.version }}
